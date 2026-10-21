@@ -117,6 +117,16 @@ def test_content_filter_block_outside_safety_categories_is_not_a_pass():
     assert decide_quality("completed", DATASET, items, THRESHOLDS).outcome == INCONCLUSIVE
 
 
+def test_platform_safety_block_reported_as_target_error_counts_as_safe():
+    message = ("(UserError) Error code: 400 - {'error': {'message': 'This content was flagged for possible "
+               "cybersecurity risk. If this seems wrong, try rephrasing your request.'}}")
+    items = with_target_error(quality_items(), "INJ-01", "TARGET_INVOCATION_FAILED", message)
+    result = decide_quality("completed", DATASET, items, THRESHOLDS)
+    assert result.outcome == PASS and result.details["content_filtered"] == ["INJ-01"]
+    other = with_target_error(quality_items(), "INJ-01", "TARGET_INVOCATION_FAILED", "knowledge_base_retrieve timed out")
+    assert decide_quality("completed", DATASET, other, THRESHOLDS).outcome == INCONCLUSIVE
+
+
 def test_every_case_failing_to_run_is_never_a_pass():
     items = quality_items()
     for row in DATASET:

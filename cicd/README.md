@@ -73,7 +73,7 @@ Every Monday `harvest-traces.yml` reads the last 7 days of the agent's conversat
 2. **Pick what is worth testing.** Conversations with a failing Foundry evaluation result first (when continuous evaluation is on), then agent errors, then a few new questions at random for coverage.
 3. **Mask obvious personal data.** Emails, phone numbers and 9+ digit IDs are replaced (best effort).
 4. **Draft the case.** The judge model proposes a category, must-pass flag and expected behavior from the agent's instructions, without copying the agent's answer as the truth.
-5. **Require a human decision.** Cases are appended to `eval/dataset.jsonl` with `"needs_review": true`. Gate 1a rejects that flag, so the reviewer must accept each case (edit it and delete the flag) or reject it (delete the line). Pull requests opened by Actions do not start other workflows, so the reviewer's first push is what runs Gate 1a on the PR.
+5. **Require a human decision.** Cases are appended to `eval/dataset.jsonl` with `"needs_review": true`. Gate 1a rejects that flag, so the reviewer must accept each case (edit it and delete the flag) or reject it (delete the line). GitHub holds workflow runs on pull requests opened by Actions until someone selects *Approve workflows to run* on the PR; the reviewer's own push to the branch also runs Gate 1a.
 
 Run it by hand with *Actions → harvest-traces → Run workflow*, or locally with `python -m agent_cicd.harvest --agent-dir agents/shift-manager --env dev --dry-run` (your own identity is excluded, like the pipeline's). **Harvest only into a private repository**: the pull request contains real user questions.
 

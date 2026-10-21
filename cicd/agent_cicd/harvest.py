@@ -173,7 +173,7 @@ def render_pr_body(cases: list[dict[str, Any]], candidates: list[Candidate], sta
         "",
         f"Harvested automatically from App Insights. **{len(cases)} case(s)** were appended to `{dataset_path}` "
         "with `\"needs_review\": true`. Gate 1a fails until every case is reviewed, so nothing reaches the "
-        "quality gate without a human decision.",
+                "quality gate without a human decision. Select *Approve workflows to run* below to start Gate 1a on this PR.",
         "",
         "### How to review",
         "For each case: **keep** it (fix `category`, `must_pass` and `expected_behavior`, then delete the "

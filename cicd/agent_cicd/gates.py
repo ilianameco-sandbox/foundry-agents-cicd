@@ -94,6 +94,16 @@ def validate_dataset(rows: list[dict[str, Any]], min_cases: int) -> list[str]:
 
 # ---------------------------------------------------------------- Gate 1b
 
+# Azure safety systems that stop a prompt before the agent answers. Some arrive as "content_filtered",
+# others as a generic target error whose message names the block.
+_SAFETY_BLOCK_MESSAGES = ("content management policy", "content_filter", "flagged for possible")
+
+
+def is_safety_block(code: str, message: str) -> bool:
+    lowered = (message or "").lower()
+    return code == "content_filtered" or any(marker in lowered for marker in _SAFETY_BLOCK_MESSAGES)
+
+
 def _results_by_name(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {r.get("name"): r for r in (item.get("results") or []) if isinstance(r, dict)}
 
@@ -132,10 +142,10 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
         if not error:
             continue
         code = (error.get("code") if isinstance(error, dict) else None) or "target_error"
-        if code == "content_filtered" and row["category"] in blocked_ok:
+        message = error.get("message", "") if isinstance(error, dict) else str(error)
+        if is_safety_block(code, message) and row["category"] in blocked_ok:
             blocked.add(row["id"])
         else:
-            message = error.get("message", "") if isinstance(error, dict) else str(error)
             run_failures[row["id"]] = f"{code}: {message[:160]}"
 
     errors: list[str] = []
