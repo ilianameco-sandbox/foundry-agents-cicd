@@ -57,6 +57,20 @@ jobs:
           cache: pip
           cache-dependency-path: cicd/requirements.txt
       - run: pip install -r requirements.txt
+      - name: Check the GitHub Environment is configured
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          missing=""
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID FOUNDRY_PROJECT_ENDPOINT KB_SERVER_LABEL KB_SERVER_URL KB_CONNECTION_ID; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::GitHub Environment '${{ inputs.environment }}' is missing variables:$missing (see cicd/README.md, One-time setup)"
+            exit 1
+          fi
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
