@@ -289,8 +289,10 @@ def draft_case(openai_client: Any, model: str, instructions: str, examples: dict
         + f"\n\nUser question:\n{candidate.query}\n\nWhat the agent did:\n{candidate.answer[:1500]}"
     )
     try:
-        response = openai_client.responses.create(
-            model=model, input=[{"role": "system", "content": _DRAFT_SYSTEM}, {"role": "user", "content": prompt}])
+        response = openai_client.responses.create(model=model, input=[
+            {"type": "message", "role": "developer", "content": _DRAFT_SYSTEM},
+            {"type": "message", "role": "user", "content": prompt},
+        ])
         text = (response.output_text or "").strip()
         text = re.sub(r"^```(?:json)?|```$", "", text).strip()
         draft = json.loads(text)
