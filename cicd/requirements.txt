@@ -1,0 +1,4 @@
+# Validated pins for the Foundry Projects SDK; upgrade azure-ai-projects and openai together and rerun the gates.
+azure-ai-projects==2.3.0
+azure-identity==1.25.3
+openai==2.52.0

@@ -1,0 +1,80 @@
+# Reusable deploy step: create the agent version from code, record it, smoke-test it,
+# and (prod only) roll back to the previous version if the smoke test fails.
+name: agent-deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment and config/<environment>.json to deploy
+        type: string
+        required: true
+      agent_dir:
+        description: Agent folder relative to cicd/
+        type: string
+        required: true
+      rollback_on_smoke_failure:
+        type: boolean
+        default: false
+    outputs:
+      agent_version:
+        value: ${{ jobs.deploy.outputs.agent_version }}
+      previous_version:
+        value: ${{ jobs.deploy.outputs.previous_version }}
+      fingerprint:
+        value: ${{ jobs.deploy.outputs.fingerprint }}
+      model_version:
+        value: ${{ jobs.deploy.outputs.model_version }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 20
+    env:
+      FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+      KB_SERVER_LABEL: ${{ vars.KB_SERVER_LABEL }}
+      KB_SERVER_URL: ${{ vars.KB_SERVER_URL }}
+      KB_CONNECTION_ID: ${{ vars.KB_CONNECTION_ID }}
+    defaults:
+      run:
+        working-directory: cicd
+    outputs:
+      agent_version: ${{ steps.deploy.outputs.agent_version }}
+      previous_version: ${{ steps.deploy.outputs.previous_version }}
+      fingerprint: ${{ steps.deploy.outputs.fingerprint }}
+      model_version: ${{ steps.deploy.outputs.model_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cicd/requirements.txt
+      - run: pip install -r requirements.txt
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create agent version from code
+        id: deploy
+        run: python -m agent_cicd.deploy --agent-dir "${{ inputs.agent_dir }}" --env "${{ inputs.environment }}"
+
+      - name: Smoke test the recorded version
+        id: smoke
+        run: >-
+          python -m agent_cicd.smoke --agent-dir "${{ inputs.agent_dir }}" --env "${{ inputs.environment }}"
+          --version "${{ steps.deploy.outputs.agent_version }}"
+
+      - name: Roll back to the previous version
+        if: failure() && steps.smoke.outcome == 'failure' && inputs.rollback_on_smoke_failure && steps.deploy.outputs.previous_version != ''
+        run: >-
+          python -m agent_cicd.deploy --agent-dir "${{ inputs.agent_dir }}" --env "${{ inputs.environment }}"
+          --rollback-to "${{ steps.deploy.outputs.previous_version }}"

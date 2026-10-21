@@ -1,0 +1,175 @@
+"""Gate 2: red-team one exact agent version in Foundry, or reuse a recent passing scan of the same agent.
+
+A scan is skipped only when a completed scan in the last `reuse_days` days covered the identical
+fingerprint (definition + model version) under the identical policy and still passes the gate today.
+
+Examples:
+  python -m agent_cicd.redteam_gate --agent-dir agents/shift-manager --env dev --validate-only
+  python -m agent_cicd.redteam_gate --agent-dir agents/shift-manager --env dev --version 5 \
+      --fingerprint <sha256> --report out/redteam.json [--force]
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import time
+from pathlib import Path
+from typing import Any
+
+from .definition import render_agent
+from .foundry import add_summary, project_client, set_outputs, to_plain, wait_for_run, write_report
+from .gates import FAIL, GateResult, decide_redteam, to_markdown
+
+
+def load_policy(agent_dir: Path) -> dict[str, Any]:
+    policy = json.loads((agent_dir / "eval" / "redteam.json").read_text(encoding="utf-8"))
+    for key in ("eval_name", "evaluators", "categories", "attack_strategies", "num_turns", "min_attacks_per_category"):
+        if key not in policy:
+            raise ValueError(f"redteam.json: '{key}' is required")
+    for category, rule in policy["categories"].items():
+        if not 0.0 <= float(rule["max_asr"]) < 1.0:
+            raise ValueError(f"redteam.json: categories.{category}.max_asr must be between 0 and 1")
+    return policy
+
+
+def policy_hash(policy: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(policy, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+
+
+def _criteria(policy: dict[str, Any], judge_deployment: str) -> list[dict[str, Any]]:
+    criteria = []
+    for name, spec in policy["evaluators"].items():
+        criterion = {"type": "azure_ai_evaluator", "name": name, "evaluator_name": f"builtin.{name}",
+                     "evaluator_version": spec["version"]}
+        if spec.get("needs_judge"):
+            criterion["initialization_parameters"] = {"deployment_name": judge_deployment}
+        criteria.append(criterion)
+    return criteria
+
+
+def _find_or_create_eval(openai_client, policy: dict[str, Any], judge_deployment: str):
+    for evaluation in openai_client.evals.list(limit=100):
+        if evaluation.name == policy["eval_name"]:
+            return evaluation
+    return openai_client.evals.create(
+        name=policy["eval_name"],
+        data_source_config={"type": "azure_ai_source", "scenario": "red_team"},
+        testing_criteria=_criteria(policy, judge_deployment),
+    )
+
+
+def _reusable_run(openai_client, eval_id: str, agent_name: str, agent_fingerprint: str, policy: dict[str, Any]):
+    """Return (run, items, result) for the newest passing scan of the same fingerprint and policy, or None."""
+    cutoff = time.time() - float(policy.get("reuse_days", 30)) * 86400
+    wanted = {"agent_name": agent_name, "fingerprint": agent_fingerprint[:32], "policy": policy_hash(policy)}
+    for run in openai_client.evals.runs.list(eval_id=eval_id, limit=50, order="desc"):
+        metadata = run.metadata or {}
+        if run.status != "completed" or (run.created_at or 0) < cutoff:
+            continue
+        if any(metadata.get(key) != value for key, value in wanted.items()):
+            continue
+        items = [to_plain(i) for i in openai_client.evals.runs.output_items.list(run_id=run.id, eval_id=eval_id)]
+        result = decide_redteam(run.status, items, policy)
+        if result.allows_promotion:
+            return run, items, result
+    return None
+
+
+def run_redteam_gate(agent_dir: Path, environment: str, version: str, agent_fingerprint: str,
+                     force: bool, report: Path | None) -> GateResult:
+    from azure.ai.projects.models import AgentTaxonomyInput, AzureAIAgentTarget, EvaluationTaxonomy, RiskCategory
+
+    rendered = render_agent(agent_dir, environment, require_configured=True)
+    policy = load_policy(agent_dir)
+    with project_client(rendered.project_endpoint) as client, client.get_openai_client() as openai_client:
+        evaluation = _find_or_create_eval(openai_client, policy, rendered.judge_deployment)
+
+        if not force:
+            reused = _reusable_run(openai_client, evaluation.id, rendered.agent_name, agent_fingerprint, policy)
+            if reused:
+                run, items, result = reused
+                result.reasons.insert(0, f"Reused scan {run.id}: same agent fingerprint and policy, still passing")
+                result.details.update({"eval_id": evaluation.id, "run_id": run.id, "reused": True,
+                                       "report_url": getattr(run, "report_url", None)})
+                write_report(report, {"result": result.to_dict(), "run": to_plain(run), "output_items": items})
+                return result
+
+        target = AzureAIAgentTarget(name=rendered.agent_name, version=str(version),
+                                    tool_descriptions=list(rendered.tool_descriptions))
+        taxonomy = client.beta.evaluation_taxonomies.create(
+            name=f"{rendered.agent_name}-v{version}",
+            taxonomy=EvaluationTaxonomy(
+                description=f"Red-team gate taxonomy for {rendered.agent_name} v{version}",
+                taxonomy_input=AgentTaxonomyInput(
+                    risk_categories=[RiskCategory[c.upper()] for c in policy["categories"]], target=target),
+            ),
+        )
+        metadata = {"agent_name": rendered.agent_name, "agent_version": str(version),
+                    "fingerprint": agent_fingerprint[:32], "policy": policy_hash(policy),
+                    "git_sha": os.environ.get("GITHUB_SHA", "local")[:40]}
+        run = openai_client.evals.runs.create(
+            eval_id=evaluation.id,
+            name=f"{rendered.agent_name} v{version} red-team gate",
+            metadata=metadata,
+            data_source={
+                "type": "azure_ai_red_team",
+                "item_generation_params": {
+                    "type": "red_team_taxonomy",
+                    "attack_strategies": policy["attack_strategies"],
+                    "num_turns": int(policy["num_turns"]),
+                    "source": {"type": "file_id", "id": taxonomy.id},
+                },
+                "target": target.as_dict(),
+            },
+        )
+        run = wait_for_run(lambda: openai_client.evals.runs.retrieve(run_id=run.id, eval_id=evaluation.id),
+                           float(policy.get("timeout_minutes", 240)), "redteam")
+        items = []
+        if run.status == "completed":
+            items = [to_plain(i) for i in openai_client.evals.runs.output_items.list(run_id=run.id, eval_id=evaluation.id)]
+
+    result = decide_redteam(run.status, items, policy)
+    result.details.update({"eval_id": evaluation.id, "run_id": run.id, "reused": False,
+                           "report_url": getattr(run, "report_url", None)})
+    write_report(report, {"result": result.to_dict(), "run": to_plain(run), "output_items": items})
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--agent-dir", type=Path, required=True)
+    parser.add_argument("--env", required=True)
+    parser.add_argument("--version")
+    parser.add_argument("--fingerprint", help="Fingerprint recorded by the deploy step")
+    parser.add_argument("--force", action="store_true", help="Always run a new scan")
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--results-file", type=Path, help="Decide from a downloaded results .jsonl (offline)")
+    parser.add_argument("--validate-only", action="store_true")
+    args = parser.parse_args()
+
+    policy = load_policy(args.agent_dir)
+    if args.validate_only:
+        print(f"Red-team policy is valid ({len(policy['categories'])} categories, hash {policy_hash(policy)})")
+        return 0
+    if args.results_file:
+        items = [json.loads(line) for line in args.results_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        result = decide_redteam("completed", items, policy)
+    else:
+        if not args.version or not args.fingerprint:
+            parser.error("--version and --fingerprint are required to run the gate")
+        try:
+            result = run_redteam_gate(args.agent_dir, args.env, args.version, args.fingerprint, args.force, args.report)
+        except Exception as error:  # noqa: BLE001 - any unexpected error fails the gate closed
+            result = GateResult(gate="redteam", outcome=FAIL,
+                                reasons=[f"Gate error (fail closed): {type(error).__name__}: {error}"])
+    link = result.details.get("report_url")
+    add_summary(to_markdown(result, header=f"Foundry run: {link}" if link else ""))
+    set_outputs(redteam_outcome=result.outcome, redteam_reused=str(result.details.get("reused", False)).lower())
+    return 0 if result.allows_promotion else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

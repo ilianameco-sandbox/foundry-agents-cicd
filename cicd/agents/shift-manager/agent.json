@@ -1,0 +1,19 @@
+{
+  "kind": "prompt",
+  "instructions_file": "instructions.md",
+  "reasoning": {"effort": "low"},
+  "tools": [
+    {"type": "web_search"},
+    {
+      "type": "mcp",
+      "server_label": "${KB_SERVER_LABEL}",
+      "server_url": "${KB_SERVER_URL}",
+      "require_approval": "never",
+      "project_connection_id": "${KB_CONNECTION_ID}"
+    }
+  ],
+  "tool_descriptions": [
+  {"name": "web_search", "description": "Public web search. The instructions forbid using web knowledge for out-of-scope answers."},
+  {"name": "shiftmanager-kb", "description": "Read-only knowledge base of synthetic shift logs, work orders, tasks, observations, training and work-protection records."}
+  ]
+}

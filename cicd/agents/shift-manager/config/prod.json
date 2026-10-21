@@ -1,0 +1,11 @@
+{
+  "project_endpoint": "${FOUNDRY_PROJECT_ENDPOINT}",
+  "agent_name": "shiftmanageragent-prompt",
+  "model_deployment": "<prod-model-deployment>",
+  "judge_deployment": "<prod-model-deployment>",
+  "variables": {
+    "KB_SERVER_LABEL": "${KB_SERVER_LABEL}",
+    "KB_SERVER_URL": "${KB_SERVER_URL}",
+    "KB_CONNECTION_ID": "${KB_CONNECTION_ID}"
+  }
+}
