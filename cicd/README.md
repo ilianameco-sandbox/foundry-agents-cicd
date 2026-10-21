@@ -24,12 +24,14 @@ cicd/
     eval/dataset.jsonl    29 cases: 21 must-pass (scope, authority, prompt injection, safety) + 8 handover-quality
     eval/thresholds.json  Gate 1b criteria and floors
     eval/redteam.json     Gate 2 risk categories, limits, attack strategies, reuse window
-  agent_cicd/             deploy, smoke, quality_gate, redteam_gate CLIs + pure gate logic (gates.py)
-  tests/                  offline unit tests for the gate rules and definition rendering
+    eval/harvest.json     weekly trace harvest settings (lookback, limits, identities to ignore)
+  agent_cicd/             deploy, smoke, quality_gate, redteam_gate, harvest CLIs + pure gate logic (gates.py)
+  tests/                  offline unit tests for the gate rules, definition rendering and harvest selection
   .env.example            template for the environment variables (copy to cicd/.env for local runs; .env is gitignored)
 .github/workflows/
   shift-manager-cicd.yml  the pipeline
   agent-deploy.yml        reusable deploy step (create version → record it → smoke test → optional rollback)
+  harvest-traces.yml      weekly: real conversations → candidate test cases → pull request
 ```
 
 **No endpoints in the repo.** Any `${NAME}` value in `config/<env>.json` is read from the environment: GitHub Environment variables in Actions, or `cicd/.env` locally (real environment variables win). Until they are set, the config renders (so CI dry runs work) but every command that calls Azure refuses to run.
@@ -50,6 +52,7 @@ cicd/
    - `prod`: the same seven variables with prod values; **required reviewers**, **prevent self-review**, deployment tags `shift-manager-v*` only. On private repos, required reviewers need GitHub Enterprise.
 4. **Prod config.** Set `model_deployment` / `judge_deployment` in `agents/shift-manager/config/prod.json` once the prod Foundry project exists.
 5. **Ownership.** Add a `CODEOWNERS` entry so changes to `cicd/agents/*/eval/` and `cicd/agents/*/config/` need RAI / platform review.
+6. **Trace harvest (optional).** The Foundry project needs an Application Insights connection with tracing enabled (the harvester finds it through the project, so no extra variable). Give the dev identity **Monitoring Reader** on that Application Insights resource, and turn on *Settings → Actions → General → Allow GitHub Actions to create and approve pull requests*.
 
 ## Day to day
 
@@ -61,6 +64,18 @@ cicd/
 | Actions → *shift-manager-cicd* → Run workflow with `force_redteam` | Deploys dev, runs Gate 1b and a fresh red-team scan (no prod) |
 
 Each gate writes a table to the job summary and uploads its full report (`quality-gate-report`, `redteam-gate-report`) with the Foundry run link, so the prod approver sees the evidence on the run page.
+
+## The test set grows from real conversations
+
+Every Monday `harvest-traces.yml` reads the last 7 days of the agent's conversations from Application Insights and opens a pull request with up to 15 candidate test cases:
+
+1. **Ignore test traffic.** Conversations without a user ID (Foundry evaluation and red-team runs), from the pipeline's own identity, or whose question is already in the dataset or smoke test are skipped.
+2. **Pick what is worth testing.** Conversations with a failing Foundry evaluation result first (when continuous evaluation is on), then agent errors, then a few new questions at random for coverage.
+3. **Mask obvious personal data.** Emails, phone numbers and 9+ digit IDs are replaced (best effort).
+4. **Draft the case.** The judge model proposes a category, must-pass flag and expected behavior from the agent's instructions, without copying the agent's answer as the truth.
+5. **Require a human decision.** Cases are appended to `eval/dataset.jsonl` with `"needs_review": true`. Gate 1a rejects that flag, so the reviewer must accept each case (edit it and delete the flag) or reject it (delete the line). Pull requests opened by Actions do not start other workflows, so the reviewer's first push is what runs Gate 1a on the PR.
+
+Run it by hand with *Actions → harvest-traces → Run workflow*, or locally with `python -m agent_cicd.harvest --agent-dir agents/shift-manager --env dev --dry-run` (your own identity is excluded, like the pipeline's). **Harvest only into a private repository**: the pull request contains real user questions.
 
 ## Run locally
 

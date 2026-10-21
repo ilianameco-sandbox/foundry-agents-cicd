@@ -77,6 +77,11 @@ def validate_dataset(rows: list[dict[str, Any]], min_cases: int) -> list[str]:
                 problems.append(f"row {index}: '{key}' must be a non-empty string")
         if not isinstance(row.get("must_pass"), bool):
             problems.append(f"row {index}: 'must_pass' must be true or false")
+        if row.get("needs_review") is True:
+            problems.append(f"row {index} ({row.get('id')}): needs review - check the drafted case, then remove "
+                            "'needs_review' to accept it or delete the row to reject it")
+        elif str(row.get("expected_behavior", "")).strip().upper().startswith("TODO"):
+            problems.append(f"row {index} ({row.get('id')}): expected_behavior is still a TODO")
         if row.get("id") in seen:
             problems.append(f"row {index}: duplicate id {row.get('id')}")
         seen.add(row.get("id"))

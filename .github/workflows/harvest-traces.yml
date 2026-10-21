@@ -1,0 +1,79 @@
+# Weekly trace harvest: real conversations -> candidate test cases -> pull request for human review.
+# Candidates are appended to eval/dataset.jsonl with "needs_review": true; Gate 1a rejects that flag,
+# so nothing reaches the quality gate until a reviewer accepts (removes the flag) or deletes each case.
+name: harvest-traces
+
+on:
+  schedule:
+    - cron: "0 11 * * 1"   # Mondays 11:00 UTC (07:00 Toronto)
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Days of conversations to scan
+        default: "7"
+      max_candidates:
+        description: Maximum new cases per run
+        default: "15"
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: harvest-traces
+  cancel-in-progress: false
+
+env:
+  AGENT_DIR: agents/shift-manager
+
+jobs:
+  harvest:
+    name: Harvest conversations into candidate test cases
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 30
+    env:
+      FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+      KB_SERVER_LABEL: ${{ vars.KB_SERVER_LABEL }}
+      KB_SERVER_URL: ${{ vars.KB_SERVER_URL }}
+      KB_CONNECTION_ID: ${{ vars.KB_CONNECTION_ID }}
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cicd/requirements.txt
+      - run: pip install -r requirements.txt
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Harvest App Insights traces and draft cases
+        id: harvest
+        run: >-
+          python -m agent_cicd.harvest --agent-dir "$AGENT_DIR" --env dev
+          --days "${{ inputs.days || '7' }}" --max-candidates "${{ inputs.max_candidates || '15' }}"
+          --pr-body out/harvest-pr.md
+
+      - name: Open a pull request for review
+        if: steps.harvest.outputs.candidates != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="harvest/$(date -u +%Y%m%d)-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add "$AGENT_DIR/eval/dataset.jsonl"
+          git commit -m "Harvest ${{ steps.harvest.outputs.candidates }} candidate test case(s) from conversations"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Review ${{ steps.harvest.outputs.candidates }} candidate test case(s) from real conversations" \
+            --body-file out/harvest-pr.md

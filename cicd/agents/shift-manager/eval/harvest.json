@@ -1,0 +1,8 @@
+{
+  "lookback_days": 7,
+  "max_candidates": 15,
+  "sample_size": 5,
+  "max_traces": 5000,
+  "require_user_id": true,
+  "exclude_user_ids": []
+}

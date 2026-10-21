@@ -17,7 +17,7 @@ release tag ──► Gate 2 AI red team (reused if the agent is unchanged) ─�
 ## Contents
 
 - [cicd/](cicd/): agent-as-code, eval datasets, thresholds, the gate CLIs and tests. **Start with [cicd/README.md](cicd/README.md)** for setup and the runbook.
-- [.github/workflows/](.github/workflows/): the pipeline (`shift-manager-cicd.yml`) and the reusable deploy workflow (`agent-deploy.yml`).
+- [.github/workflows/](.github/workflows/): the pipeline (`shift-manager-cicd.yml`), the reusable deploy workflow (`agent-deploy.yml`) and the weekly trace harvest that proposes new test cases from real conversations (`harvest-traces.yml`).
 - [docs/](docs/): design diagrams (open the `.drawio` files at [app.diagrams.net](https://app.diagrams.net)) and a mock pipeline dashboard (`agent-cicd-dashboard.html`, illustrative data).
 
 ## Quick start

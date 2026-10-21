@@ -94,7 +94,8 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
             metadata=metadata,
             data_source={
                 "type": "azure_ai_target_completions",
-                "source": {"type": "file_content", "content": [{"item": row} for row in dataset]},
+                "source": {"type": "file_content", "content": [
+                    {"item": {key: row[key] for key in item_schema["properties"] if key in row}} for row in dataset]},
                 "input_messages": {"type": "template", "template": [
                     {"type": "message", "role": "user", "content": {"type": "input_text", "text": "{{item.query}}"}},
                 ]},
