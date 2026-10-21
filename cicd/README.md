@@ -43,7 +43,7 @@ cicd/
 
 ## One-time setup
 
-1. **Identity for GitHub (OIDC, no secrets).** Create an Entra app registration or user-assigned managed identity per environment and add federated credentials with subject `repo:<org>/<repo>:environment:dev` and `repo:<org>/<repo>:environment:prod`.
+1. **Identity for GitHub (OIDC, no secrets).** Create an Entra app registration or user-assigned managed identity per environment and add a federated credential (issuer `https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange`) whose subject matches the `environment:dev` / `environment:prod` token. Classic repos use `repo:<owner>/<repo>:environment:dev`; newer repos use the immutable format `repo:<owner>@<owner-id>/<repo>@<repo-id>:environment:dev`. If login fails with `AADSTS700213`, copy the exact "subject claim" printed by the `azure/login` step into the credential.
 2. **Permissions.** Give each identity **Foundry User** (formerly *Azure AI User*) on its Foundry project. That covers creating agent versions, running evaluations and red-team runs, and creating evaluation taxonomies.
 3. **GitHub Environments** (repo *Settings → Environments*):
    - `dev`: variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` plus the four agent variables above (`FOUNDRY_PROJECT_ENDPOINT`, `KB_SERVER_LABEL`, `KB_SERVER_URL`, `KB_CONNECTION_ID`); deployment branches/tags `main` and `shift-manager-v*`.
