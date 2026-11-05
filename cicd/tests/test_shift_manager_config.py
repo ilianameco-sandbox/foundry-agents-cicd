@@ -217,3 +217,23 @@ def test_prepare_taxonomy_creates_or_reuses_without_listing(exists):
     assert client.beta.evaluation_taxonomies.created == ([] if exists else ["t"])
     assert enabled == (["a"] if exists else ["a", "b"])
     assert all(s["enabled"] for c in client.beta.evaluation_taxonomies.store["t"]["taxonomyCategories"] for s in c["subCategories"])
+
+
+def test_judge_error_is_not_a_verdict_and_is_retried():
+    from agent_cicd.gates import cases_with_judge_errors
+    dataset = [r for r in load_jsonl(AGENT_DIR / "eval" / "dataset.jsonl") if r.get("suite") == "behavior"]
+    thresholds = json.loads((AGENT_DIR / "eval" / "thresholds.json").read_text(encoding="utf-8"))
+    thresholds = {**thresholds, "suites": {"behavior": thresholds["suites"]["behavior"]}}
+    thresholds["criteria"] = {"expected_behavior": thresholds["criteria"]["expected_behavior"]}
+    items = []
+    for row in dataset:
+        result = {"name": "expected_behavior", "passed": True, "score": 1.0, "sample": {"error": None}}
+        if row["id"] == "SCOPE-02":
+            result = {"name": "expected_behavior", "passed": False, "score": 0.0,
+                      "sample": {"error": {"code": "429", "message": "exceeded token rate limit"}}}
+        items.append({"datasource_item": {"id": row["id"]}, "sample": {"error": None}, "results": [result]})
+    assert cases_with_judge_errors(items) == ["SCOPE-02"]
+    decided = decide_quality("completed", dataset, items, thresholds)
+    assert decided.outcome == INCONCLUSIVE
+    assert "SCOPE-02" not in decided.details["must_pass_failures"]
+    assert any("judge error 429" in e for e in decided.details["errors"])

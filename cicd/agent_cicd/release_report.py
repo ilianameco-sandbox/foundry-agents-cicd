@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .foundry import add_summary, set_outputs
-from .gates import FAIL, INCONCLUSIVE, PASS, REVIEW, suite_of
+from .gates import FAIL, INCONCLUSIVE, PASS, REVIEW, judge_error, suite_of
 
 NOT_RUN = "NOT RUN"
 ICON = {PASS: "✅", REVIEW: "🔍", INCONCLUSIVE: "⚠️", FAIL: "❌", NOT_RUN: "⛔"}
@@ -67,6 +67,7 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
 
     slices: dict[str, dict[str, dict[str, list[int]]]] = {}
     failures = []
+    not_scored: list[str] = []
     doc_judges = (thresholds.get("suites", {}).get("documents") or {}).get("criteria", [])
     slice_fields = (thresholds.get("suites", {}).get("documents") or {}).get("slices", [])
     # Cases the gate already treated as safe blocks or as "could not run" are reported separately, not as failures.
@@ -83,11 +84,12 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
                 value = str(ds.get(field) or "none")
                 for judge in judges:
                     verdict = (results.get(judge) or {}).get("passed")
-                    if isinstance(verdict, bool):
+                    if isinstance(verdict, bool) and not judge_error(results.get(judge) or {}):
                         bucket = slices.setdefault(field, {}).setdefault(value, {}).setdefault(judge, [0, 0])
                         bucket[0] += verdict
                         bucket[1] += 1
-        failed = [j for j in judges if (results.get(j) or {}).get("passed") is False]
+        not_scored += [f"{ds.get('id')}:{j}" for j in judges if judge_error(results.get(j) or {})]
+        failed = [j for j in judges if (results.get(j) or {}).get("passed") is False and not judge_error(results.get(j) or {})]
         if failed:
             failures.append({
                 "id": ds.get("id"), "suite": suite, "must_pass": bool(ds.get("must_pass")),
@@ -103,6 +105,7 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
         "criteria": criteria_rows, "slices": slices, "failures": failures,
         "failure_count": len(failures), "suites": details.get("suites") or {},
         "could_not_run": details.get("could_not_run") or {}, "content_filtered": details.get("content_filtered") or [],
+        "not_scored": not_scored, "judge_retries": details.get("judge_retries") or {},
         "report_url": details.get("report_url"),
     }
 
@@ -188,6 +191,8 @@ def render_markdown(packet: dict[str, Any]) -> str:
                 lines.append(f"| {value} | {n} | " + " | ".join(_rate(*buckets.get(j, [0, 0])) for j in judges) + " |")
         if q.get("content_filtered"):
             lines += ["", "Blocked by Azure safety filters (counted as safe): " + ", ".join(q["content_filtered"])]
+        if q.get("not_scored"):
+            lines += ["", "Not scored, judge call failed after retries (blocks the gate): " + ", ".join(q["not_scored"])]
         if q.get("could_not_run"):
             lines += ["", "Could not run (blocks the gate): " + ", ".join(sorted(q["could_not_run"]))]
         if q["failures"]:

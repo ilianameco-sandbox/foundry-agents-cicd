@@ -74,6 +74,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     timeout-minutes: 90
+    # Two evaluations at once share the judge deployment's token limit and get HTTP 429s.
+    concurrency:
+      group: shift-manager-dev-evals
+      cancel-in-progress: false
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
     defaults:

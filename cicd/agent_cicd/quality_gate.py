@@ -11,12 +11,14 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from .definition import render_agent
 from .foundry import add_summary, project_client, set_outputs, to_plain, wait_for_run, write_report
-from .gates import FAIL, GateResult, decide_quality, load_jsonl, suite_of, to_markdown, validate_dataset
+from .gates import (FAIL, GateResult, cases_with_judge_errors, decide_quality, load_jsonl, suite_of, to_markdown,
+                    validate_dataset)
 
 EXPECTED_BEHAVIOR_SYSTEM = (
     "You review answers from a read-only Shift Manager assistant for a nuclear operations organisation. "
@@ -120,6 +122,24 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
 
     # One Foundry evaluation per suite so each suite only pays for (and reports) its own judges.
     runs: dict[str, dict[str, Any]] = {}
+    retries: dict[str, list[dict[str, Any]]] = {}
+    timeout = float(thresholds.get("timeout_minutes", 45))
+
+    def start_run(openai_client, eval_id: str, name: str, rows: list[dict[str, Any]], label: str):
+        return openai_client.evals.runs.create(
+            eval_id=eval_id,
+            name=f"{rendered.agent_name} v{version} quality gate ({label})",
+            metadata={**metadata, "suite": name},
+            data_source={
+                "type": "azure_ai_target_completions",
+                "source": {"type": "file_content", "content": [{"item": _item(row)} for row in rows]},
+                "input_messages": {"type": "template", "template": [
+                    {"type": "message", "role": "user", "content": {"type": "input_text", "text": "{{item.query}}"}},
+                ]},
+                "target": target,
+            },
+        )
+
     with project_client(rendered.project_endpoint) as client, client.get_openai_client() as openai_client:
         for name, spec in suites.items():
             evaluation = openai_client.evals.create(
@@ -128,29 +148,36 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
                 testing_criteria=build_criteria(thresholds, rendered.judge_deployment, spec["criteria"]),
                 metadata={**metadata, "suite": name},
             )
-            run = openai_client.evals.runs.create(
-                eval_id=evaluation.id,
-                name=f"{rendered.agent_name} v{version} quality gate ({name})",
-                metadata={**metadata, "suite": name},
-                data_source={
-                    "type": "azure_ai_target_completions",
-                    "source": {"type": "file_content", "content": [{"item": _item(row)} for row in spec["rows"]]},
-                    "input_messages": {"type": "template", "template": [
-                        {"type": "message", "role": "user", "content": {"type": "input_text", "text": "{{item.query}}"}},
-                    ]},
-                    "target": target,
-                },
-            )
-            runs[name] = {"eval_id": evaluation.id, "run": run}
+            runs[name] = {"eval_id": evaluation.id, "run": start_run(openai_client, evaluation.id, name, spec["rows"], name)}
         items: list[dict[str, Any]] = []
         for name, entry in runs.items():
             eval_id = entry["eval_id"]
             run = wait_for_run(lambda: openai_client.evals.runs.retrieve(run_id=entry["run"].id, eval_id=eval_id),
-                               float(thresholds.get("timeout_minutes", 45)), f"quality:{name}")
+                               timeout, f"quality:{name}")
             entry["run"] = run
-            if run.status == "completed":
-                items += [to_plain(item) for item in openai_client.evals.runs.output_items.list(
-                    run_id=run.id, eval_id=eval_id)]
+            if run.status != "completed":
+                continue
+            suite_items = [to_plain(item) for item in openai_client.evals.runs.output_items.list(
+                run_id=run.id, eval_id=eval_id)]
+            # A judge call that failed (usually HTTP 429 when the judge deployment is busy) is not a verdict:
+            # re-run just those cases, up to twice, and keep the fresh result for each.
+            for attempt in (1, 2):
+                retry_ids = set(cases_with_judge_errors(suite_items))
+                if not retry_ids:
+                    break
+                time.sleep(60 * attempt)
+                rows = [row for row in suites[name]["rows"] if row["id"] in retry_ids]
+                retry = start_run(openai_client, eval_id, name, rows, f"{name} re-score {attempt}")
+                retry = wait_for_run(lambda: openai_client.evals.runs.retrieve(run_id=retry.id, eval_id=eval_id),
+                                     timeout, f"quality:{name}:retry{attempt}")
+                retries.setdefault(name, []).append({"run_id": retry.id, "status": retry.status,
+                                                     "cases": sorted(retry_ids)})
+                if retry.status != "completed":
+                    break
+                fresh = {(i.get("datasource_item") or {}).get("id"): i for i in (to_plain(x) for x in
+                         openai_client.evals.runs.output_items.list(run_id=retry.id, eval_id=eval_id))}
+                suite_items = [fresh.get((i.get("datasource_item") or {}).get("id"), i) for i in suite_items]
+            items += suite_items
 
     statuses = {name: entry["run"].status for name, entry in runs.items()}
     overall = "completed" if all(s == "completed" for s in statuses.values()) else next(
@@ -163,6 +190,7 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
         "suites": {name: {"eval_id": e["eval_id"], "run_id": e["run"].id, "status": e["run"].status,
                           "cases": len(suites[name]["rows"]), "report_url": getattr(e["run"], "report_url", None)}
                    for name, e in runs.items()},
+        "judge_retries": retries,
     })
     write_report(report, {"result": result.to_dict(),
                           "runs": {name: to_plain(e["run"]) for name, e in runs.items()},

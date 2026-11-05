@@ -120,6 +120,28 @@ def _results_by_name(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {r.get("name"): r for r in (item.get("results") or []) if isinstance(r, dict)}
 
 
+def judge_error(result: dict[str, Any]) -> str | None:
+    """The service reports a judge call that failed (for example HTTP 429) as passed=false; it is not a verdict."""
+    sample = result.get("sample")
+    error = sample.get("error") if isinstance(sample, dict) else None
+    if not error:
+        return None
+    if isinstance(error, dict):
+        return f"{error.get('code') or 'error'}: {str(error.get('message') or '')[:120]}"
+    return str(error)[:160]
+
+
+def cases_with_judge_errors(items: list[dict[str, Any]]) -> list[str]:
+    """Case ids where the agent answered but at least one judge call failed, so the case should be re-scored."""
+    ids = []
+    for item in items:
+        if (item.get("sample") or {}).get("error"):
+            continue
+        if any(judge_error(r) for r in _results_by_name(item).values()):
+            ids.append((item.get("datasource_item") or {}).get("id"))
+    return [i for i in ids if i]
+
+
 def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[dict[str, Any]],
                    thresholds: dict[str, Any]) -> GateResult:
     result = GateResult(gate="quality")
@@ -178,7 +200,11 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
                     scored += 1
                     passed += 1
                 continue
-            verdict = _results_by_name(item).get(name, {}).get("passed")
+            verdict_row = _results_by_name(item).get(name, {})
+            if judge_error(verdict_row):
+                errors.append(f"{row['id']}:{name} (judge error {judge_error(verdict_row)[:40]})")
+                continue
+            verdict = verdict_row.get("passed")
             if not isinstance(verdict, bool):
                 errors.append(f"{row['id']}:{name}")
                 continue
@@ -207,7 +233,8 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
                               f"{', '.join(sorted(run_failures))}. First error: {first}")
     if errors:
         outcomes.append(INCONCLUSIVE)
-        result.reasons.append(f"{len(errors)} result(s) missing or errored (fail closed): {', '.join(errors[:10])}")
+        result.reasons.append(f"{len(errors)} result(s) missing or not scored by the judge (fail closed): "
+                              f"{', '.join(errors[:10])}")
     if blocked:
         result.reasons.append(f"Blocked by the content filter (counted as safe): {', '.join(sorted(blocked))}")
 
