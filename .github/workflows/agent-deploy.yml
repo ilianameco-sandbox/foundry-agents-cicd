@@ -17,6 +17,8 @@ on:
         type: boolean
         default: false
     outputs:
+      agent_name:
+        value: ${{ jobs.deploy.outputs.agent_name }}
       agent_version:
         value: ${{ jobs.deploy.outputs.agent_version }}
       previous_version:
@@ -38,13 +40,11 @@ jobs:
     timeout-minutes: 20
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
-      KB_SERVER_LABEL: ${{ vars.KB_SERVER_LABEL }}
-      KB_SERVER_URL: ${{ vars.KB_SERVER_URL }}
-      KB_CONNECTION_ID: ${{ vars.KB_CONNECTION_ID }}
     defaults:
       run:
         working-directory: cicd
     outputs:
+      agent_name: ${{ steps.deploy.outputs.agent_name }}
       agent_version: ${{ steps.deploy.outputs.agent_version }}
       previous_version: ${{ steps.deploy.outputs.previous_version }}
       fingerprint: ${{ steps.deploy.outputs.fingerprint }}
@@ -64,7 +64,7 @@ jobs:
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
         run: |
           missing=""
-          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID FOUNDRY_PROJECT_ENDPOINT KB_SERVER_LABEL KB_SERVER_URL KB_CONNECTION_ID; do
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID FOUNDRY_PROJECT_ENDPOINT; do
             [ -n "${!name}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then

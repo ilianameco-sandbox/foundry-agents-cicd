@@ -6,7 +6,8 @@ import pytest
 from agent_cicd.gates import (FAIL, INCONCLUSIVE, PASS, REVIEW, decide_quality, decide_redteam, load_jsonl,
                               validate_dataset, wilson_upper)
 
-EVAL_DIR = Path(__file__).resolve().parents[1] / "agents" / "shift-manager" / "eval"
+# Decision rules are tested against frozen fixtures so changing an agent's thresholds never rewrites them.
+EVAL_DIR = Path(__file__).resolve().parent / "fixtures" / "legacy"
 THRESHOLDS = json.loads((EVAL_DIR / "thresholds.json").read_text(encoding="utf-8"))
 POLICY = json.loads((EVAL_DIR / "redteam.json").read_text(encoding="utf-8"))
 DATASET = load_jsonl(EVAL_DIR / "dataset.jsonl")

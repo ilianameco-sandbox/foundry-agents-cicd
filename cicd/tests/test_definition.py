@@ -7,26 +7,23 @@ import pytest
 from agent_cicd.definition import DefinitionError, fingerprint, read_dotenv, render_agent
 
 AGENT_DIR = Path(__file__).resolve().parents[1] / "agents" / "shift-manager"
-ENV = {
-    "FOUNDRY_PROJECT_ENDPOINT": "https://example.services.ai.azure.com/api/projects/dev",
-    "KB_SERVER_LABEL": "kb-example",
-    "KB_SERVER_URL": "https://example.search.windows.net/knowledgebases/example/mcp?api-version=2026-08-01-preview",
-    "KB_CONNECTION_ID": "kb-example-connection",
-}
+ENV = {"FOUNDRY_PROJECT_ENDPOINT": "https://example.services.ai.azure.com/api/projects/dev"}
 
 
 def test_dev_renders_a_deployable_prompt_agent():
     rendered = render_agent(AGENT_DIR, "dev", env=ENV)
     assert rendered.deployable
     assert rendered.project_endpoint == ENV["FOUNDRY_PROJECT_ENDPOINT"]
+    assert rendered.agent_name == "shiftmanageragent-promptv3"
     assert rendered.definition["kind"] == "prompt"
     assert rendered.definition["model"] == "gpt-5.4"
     assert rendered.definition["reasoning"] == {"effort": "low"}
-    mcp = next(t for t in rendered.definition["tools"] if t["type"] == "mcp")
-    assert mcp["project_connection_id"] == "kb-example-connection"
-    assert mcp["server_url"] == ENV["KB_SERVER_URL"]
+    search = next(t for t in rendered.definition["tools"] if t["type"] == "azure_ai_search")
+    index = search["azure_ai_search"]["indexes"][0]
+    assert index["index_asset_id"] == "shift-manager-v3/versions/1"
+    assert index["top_k"] == 5 and index["query_type"] == "simple"
     assert "${" not in json.dumps(rendered.definition)
-    assert rendered.definition["instructions"].startswith("You are the Shift Manager agent.")
+    assert rendered.definition["instructions"].startswith("You are the Shift Manager assistant")
     assert not rendered.definition["instructions"].endswith("\n")
 
 
@@ -40,7 +37,6 @@ def test_unset_environment_variables_render_but_block_azure_calls():
     rendered = render_agent(AGENT_DIR, "dev", env={})
     assert not rendered.deployable
     assert "${FOUNDRY_PROJECT_ENDPOINT} not set" in rendered.placeholders
-    assert "${KB_SERVER_URL} not set" in rendered.placeholders
     with pytest.raises(DefinitionError, match="FOUNDRY_PROJECT_ENDPOINT"):
         render_agent(AGENT_DIR, "dev", env={}, require_configured=True)
     assert render_agent(AGENT_DIR, "dev", env=ENV, require_configured=True).deployable
@@ -53,19 +49,30 @@ def test_dotenv_parsing(tmp_path):
     assert read_dotenv(tmp_path / "missing.env") == {}
 
 
-def test_prod_renders_but_is_not_deployable_until_configured():
-    rendered = render_agent(AGENT_DIR, "prod", env=ENV)
-    assert not rendered.deployable
-    assert "model_deployment" in rendered.placeholders
+def test_prod_deploys_the_same_definition_as_dev():
+    dev = render_agent(AGENT_DIR, "dev", env=ENV)
+    prod = render_agent(AGENT_DIR, "prod", env={"FOUNDRY_PROJECT_ENDPOINT": "https://example/api/projects/prod"})
+    assert prod.deployable
+    assert prod.definition == dev.definition and prod.agent_name == dev.agent_name
+
+
+def test_placeholders_block_deploys(tmp_path):
+    copy = tmp_path / "agent"
+    shutil.copytree(AGENT_DIR, copy)
+    config = json.loads((copy / "config" / "prod.json").read_text(encoding="utf-8"))
+    config["model_deployment"] = "<prod-model-deployment>"
+    (copy / "config" / "prod.json").write_text(json.dumps(config), encoding="utf-8")
+    rendered = render_agent(copy, "prod", env=ENV)
+    assert not rendered.deployable and "model_deployment" in rendered.placeholders
 
 
 def test_missing_variable_is_an_error(tmp_path):
     copy = tmp_path / "agent"
     shutil.copytree(AGENT_DIR, copy)
     config = json.loads((copy / "config" / "dev.json").read_text(encoding="utf-8"))
-    del config["variables"]["KB_SERVER_URL"]
+    del config["variables"]["SEARCH_INDEX_ASSET"]
     (copy / "config" / "dev.json").write_text(json.dumps(config), encoding="utf-8")
-    with pytest.raises(DefinitionError, match="KB_SERVER_URL"):
+    with pytest.raises(DefinitionError, match="SEARCH_INDEX_ASSET"):
         render_agent(copy, "dev", env=ENV)
 
 

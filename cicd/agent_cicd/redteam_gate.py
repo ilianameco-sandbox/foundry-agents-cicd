@@ -32,6 +32,14 @@ def load_policy(agent_dir: Path) -> dict[str, Any]:
     for category, rule in policy["categories"].items():
         if not 0.0 <= float(rule["max_asr"]) < 1.0:
             raise ValueError(f"redteam.json: categories.{category}.max_asr must be between 0 and 1")
+        if category not in policy["evaluators"]:
+            raise ValueError(f"redteam.json: category '{category}' has no evaluator, so it can never be scored")
+    # The cloud agent red team only generates attacks from a prohibited-actions taxonomy; the evaluators
+    # then score every conversation for each category.
+    policy.setdefault("taxonomy_risks", ["prohibited_actions"])
+    unsupported = set(policy["taxonomy_risks"]) - {"prohibited_actions"}
+    if unsupported:
+        raise ValueError(f"redteam.json: taxonomy_risks only supports prohibited_actions, not {sorted(unsupported)}")
     return policy
 
 
@@ -78,9 +86,62 @@ def _reusable_run(openai_client, eval_id: str, agent_name: str, agent_fingerprin
     return None
 
 
+def _prepare_taxonomy(client, name: str, target, policy: dict[str, Any], version: str) -> tuple[str, list[str]]:
+    """Create (or reuse) the generated taxonomy and enable the sub-categories the reviewed policy approves.
+
+    Foundry generates every sub-category disabled; a human must confirm which ones apply. In CI that
+    confirmation is `enabled_subcategories` in redteam.json ("all", or a list of sub-category names).
+    """
+    from azure.ai.projects.models import AgentTaxonomyInput, EvaluationTaxonomy, RiskCategory
+    from azure.core.exceptions import HttpResponseError
+
+    # `get` on a missing taxonomy returns HTTP 500 rather than 404, so check existence by listing.
+    if any(t.name == name for t in client.beta.evaluation_taxonomies.list()):
+        taxonomy = client.beta.evaluation_taxonomies.get(name=name)
+    else:
+        taxonomy = client.beta.evaluation_taxonomies.create(
+            name=name,
+            taxonomy=EvaluationTaxonomy(
+                description=f"Red-team gate taxonomy for {target.name} v{version}",
+                taxonomy_input=AgentTaxonomyInput(
+                    risk_categories=[RiskCategory[c.upper()] for c in policy["taxonomy_risks"]], target=target),
+            ),
+        )
+    # Sub-categories are generated asynchronously; wait for them before editing.
+    deadline = time.monotonic() + 600
+    body = taxonomy.as_dict()
+    while not body.get("taxonomyCategories") and time.monotonic() < deadline:
+        time.sleep(15)
+        body = client.beta.evaluation_taxonomies.get(name=name).as_dict()
+    if not body.get("taxonomyCategories"):
+        raise RuntimeError(f"Taxonomy {name} produced no categories within 10 minutes")
+    wanted = policy.get("enabled_subcategories", "all")
+    available, enabled = set(), []
+    for category in body.get("taxonomyCategories") or []:
+        for sub in category.get("subCategories") or []:
+            available.add(sub["name"])
+            sub["enabled"] = wanted == "all" or sub["name"] in wanted
+            if sub["enabled"]:
+                enabled.append(sub["name"])
+    if wanted != "all" and set(wanted) - available:
+        raise ValueError(f"redteam.json: unknown taxonomy sub-categories {sorted(set(wanted) - available)}")
+    if not enabled:
+        raise RuntimeError("The generated taxonomy has no enabled sub-categories, so no attacks would run")
+    # The service expects the complete taxonomy document back, including read-only fields.
+    for attempt in range(1, 6):
+        try:
+            updated = client.beta.evaluation_taxonomies.update(name=name, taxonomy=body)
+            break
+        except HttpResponseError as error:
+            if attempt == 5 or (error.status_code or 0) < 500:
+                raise
+            time.sleep(20 * attempt)
+    return updated.id, sorted(enabled)
+
+
 def run_redteam_gate(agent_dir: Path, environment: str, version: str, agent_fingerprint: str,
                      force: bool, report: Path | None) -> GateResult:
-    from azure.ai.projects.models import AgentTaxonomyInput, AzureAIAgentTarget, EvaluationTaxonomy, RiskCategory
+    from azure.ai.projects.models import AzureAIAgentTarget
 
     rendered = render_agent(agent_dir, environment, require_configured=True)
     policy = load_policy(agent_dir)
@@ -99,14 +160,9 @@ def run_redteam_gate(agent_dir: Path, environment: str, version: str, agent_fing
 
         target = AzureAIAgentTarget(name=rendered.agent_name, version=str(version),
                                     tool_descriptions=list(rendered.tool_descriptions))
-        taxonomy = client.beta.evaluation_taxonomies.create(
-            name=f"{rendered.agent_name}-v{version}",
-            taxonomy=EvaluationTaxonomy(
-                description=f"Red-team gate taxonomy for {rendered.agent_name} v{version}",
-                taxonomy_input=AgentTaxonomyInput(
-                    risk_categories=[RiskCategory[c.upper()] for c in policy["categories"]], target=target),
-            ),
-        )
+        taxonomy_id, enabled = _prepare_taxonomy(
+            client, f"{rendered.agent_name}-{agent_fingerprint[:12]}-{policy_hash(policy)[:8]}", target, policy, version)
+        print(f"[redteam] taxonomy {taxonomy_id}: {len(enabled)} sub-categories enabled", flush=True)
         metadata = {"agent_name": rendered.agent_name, "agent_version": str(version),
                     "fingerprint": agent_fingerprint[:32], "policy": policy_hash(policy),
                     "git_sha": os.environ.get("GITHUB_SHA", "local")[:40]}
@@ -120,7 +176,7 @@ def run_redteam_gate(agent_dir: Path, environment: str, version: str, agent_fing
                     "type": "red_team_taxonomy",
                     "attack_strategies": policy["attack_strategies"],
                     "num_turns": int(policy["num_turns"]),
-                    "source": {"type": "file_id", "id": taxonomy.id},
+                    "source": {"type": "file_id", "id": taxonomy_id},
                 },
                 "target": target.as_dict(),
             },
@@ -133,7 +189,10 @@ def run_redteam_gate(agent_dir: Path, environment: str, version: str, agent_fing
 
     result = decide_redteam(run.status, items, policy)
     result.details.update({"eval_id": evaluation.id, "run_id": run.id, "reused": False,
-                           "report_url": getattr(run, "report_url", None)})
+                           "report_url": getattr(run, "report_url", None),
+                           "taxonomy_id": taxonomy_id, "enabled_subcategories": enabled})
+    if run.status != "completed" and getattr(run, "error", None):
+        result.reasons.append(f"Service error: {to_plain(run.error)}")
     write_report(report, {"result": result.to_dict(), "run": to_plain(run), "output_items": items})
     return result
 

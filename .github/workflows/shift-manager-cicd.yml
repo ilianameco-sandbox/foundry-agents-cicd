@@ -1,9 +1,11 @@
-# v1 CI/CD for the Shift Manager prompt agent.
-#   Gate 1a  ci            every PR and push: tests, render every env config, validate eval data and policy
-#   Gate 1b  quality-gate  push to main + release tags: Foundry cloud eval of the recorded dev version
-#   Gate 2   redteam-gate  release tags only (or manual force): Foundry AI Red Teaming of that version,
-#                          reused when the agent fingerprint has not changed in the last 30 days
-#   Gate 3   deploy-prod   release tags only: waits for the required reviewers on the `prod` environment
+# v1 CI/CD for the Shift Manager agent (shiftmanageragent-promptv3).
+#   Gate 1a  ci              every PR and push: unit tests, render every env, validate eval data and red-team policy
+#   Gate 1b  quality-gate    push to main + release tags: Foundry evaluation of the recorded dev version
+#                            (21 must-pass behavior cases + 94 golden document questions with the Shift Manager judges)
+#   Gate 2   redteam-gate    release tags (or manual force): Foundry AI Red Teaming of that version,
+#                            reused when the agent fingerprint has not changed in the last 30 days
+#   Packet   release-packet  release tags: one approval packet (job summary, HTML artifact, GitHub issue, Teams)
+#   Gate 3   deploy-prod     release tags: waits for the required reviewer on the `prod` environment, then deploys
 name: shift-manager-cicd
 
 on:
@@ -16,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       force_redteam:
-        description: Run a new red-team scan even if a recent passing scan exists
+        description: Run the red-team gate and build an approval packet (no prod deploy without a release tag)
         type: boolean
         default: false
 
@@ -42,7 +44,7 @@ jobs:
           cache: pip
           cache-dependency-path: cicd/requirements.txt
       - run: pip install -r requirements.txt pytest==8.4.2
-      - name: Unit tests (gate logic, definition rendering)
+      - name: Unit tests (gate logic, definition rendering, approval packet)
         run: python -m pytest tests -q
       - name: Render every environment without deploying (endpoints come from GitHub Environment variables, unset here)
         run: |
@@ -66,16 +68,13 @@ jobs:
       agent_dir: agents/shift-manager
 
   quality-gate:
-    name: "Gate 1b: quality"
+    name: "Gate 1b: evaluation"
     needs: deploy-dev
     runs-on: ubuntu-latest
     environment: dev
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
-      KB_SERVER_LABEL: ${{ vars.KB_SERVER_LABEL }}
-      KB_SERVER_URL: ${{ vars.KB_SERVER_URL }}
-      KB_CONNECTION_ID: ${{ vars.KB_CONNECTION_ID }}
     defaults:
       run:
         working-directory: cicd
@@ -104,7 +103,7 @@ jobs:
           if-no-files-found: ignore
 
   redteam-gate:
-    name: "Gate 2: red team"
+    name: "Gate 2: AI red teaming"
     if: startsWith(github.ref, 'refs/tags/shift-manager-v') || github.event.inputs.force_redteam == 'true'
     needs: [deploy-dev, quality-gate]
     runs-on: ubuntu-latest
@@ -112,9 +111,6 @@ jobs:
     timeout-minutes: 300
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
-      KB_SERVER_LABEL: ${{ vars.KB_SERVER_LABEL }}
-      KB_SERVER_URL: ${{ vars.KB_SERVER_URL }}
-      KB_CONNECTION_ID: ${{ vars.KB_CONNECTION_ID }}
     defaults:
       run:
         working-directory: cicd
@@ -145,10 +141,79 @@ jobs:
           path: cicd/out/redteam.json
           if-no-files-found: ignore
 
+  release-packet:
+    name: "Approval packet"
+    # Runs even when a gate failed, so the approver and the team always see why a release is blocked.
+    if: >-
+      always() && needs.deploy-dev.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/shift-manager-v') || github.event.inputs.force_redteam == 'true')
+    needs: [deploy-dev, quality-gate, redteam-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    defaults:
+      run:
+        working-directory: cicd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: quality-gate-report
+          path: cicd/in
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: redteam-gate-report
+          path: cicd/in
+      - name: Build the approval packet
+        id: packet
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: >-
+          python -m agent_cicd.release_report --agent-dir "$AGENT_DIR"
+          --quality in/quality.json --redteam in/redteam.json
+          --agent-name "${{ needs.deploy-dev.outputs.agent_name }}"
+          --version "${{ needs.deploy-dev.outputs.agent_version }}"
+          --fingerprint "${{ needs.deploy-dev.outputs.fingerprint }}"
+          --model-version "${{ needs.deploy-dev.outputs.model_version }}"
+          --markdown out/release-packet.md --html out/release-packet.html
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packet
+          path: |
+            cicd/out/release-packet.html
+            cicd/out/release-packet.md
+      - name: Post the packet to the release-approval issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          READY: ${{ steps.packet.outputs.ready }}
+        run: |
+          release="${GITHUB_REF_NAME}"
+          [ "${GITHUB_REF_TYPE}" = "tag" ] || release="${GITHUB_REF_NAME}@${GITHUB_SHA::7}"
+          title="Release approval: ${release}"
+          label="release-approval"
+          gh label create "$label" --color 0e8a16 --description "Agent release waiting for approval" 2>/dev/null || true
+          number=$(gh issue list --state open --label "$label" --search "\"$title\" in:title" --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n1)
+          head -c 60000 out/release-packet.md > out/issue-body.md
+          if [ -z "$number" ]; then
+            gh issue create --title "$title" --label "$label" --body-file out/issue-body.md
+          else
+            gh issue comment "$number" --body-file out/issue-body.md
+          fi
+
   deploy-prod:
     name: "Gate 3: approve and deploy to prod"
-    if: startsWith(github.ref, 'refs/tags/shift-manager-v')
-    needs: redteam-gate
+    if: >-
+      startsWith(github.ref, 'refs/tags/shift-manager-v') &&
+      needs.quality-gate.result == 'success' && needs.redteam-gate.result == 'success' &&
+      needs.release-packet.result == 'success'
+    needs: [quality-gate, redteam-gate, release-packet]
     concurrency:
       group: shift-manager-prod-deploy
       cancel-in-progress: false

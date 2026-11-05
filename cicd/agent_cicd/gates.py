@@ -67,12 +67,24 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+SUITE_FIELDS = {"behavior": "expected_behavior", "documents": "reference_facts"}
+
+
+def suite_of(row: dict[str, Any]) -> str:
+    """Rows without a suite are behavior cases (older datasets and harvested drafts)."""
+    return str(row.get("suite") or "behavior")
+
+
 def validate_dataset(rows: list[dict[str, Any]], min_cases: int) -> list[str]:
     """Return a list of problems; an empty list means the dataset is usable."""
     problems = []
     seen = set()
     for index, row in enumerate(rows, start=1):
-        for key in ("id", "query", "category", "expected_behavior"):
+        suite = suite_of(row)
+        if suite not in SUITE_FIELDS:
+            problems.append(f"row {index}: unknown suite '{suite}' (expected one of {sorted(SUITE_FIELDS)})")
+            continue
+        for key in ("id", "query", "category", SUITE_FIELDS[suite]):
             if not isinstance(row.get(key), str) or not row[key].strip():
                 problems.append(f"row {index}: '{key}' must be a non-empty string")
         if not isinstance(row.get("must_pass"), bool):
@@ -158,7 +170,8 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
             if item is None or row["id"] in run_failures:
                 continue
             is_must_pass_check = name == must_pass_criterion and row["must_pass"]
-            if applies_to and row["category"] not in applies_to and not is_must_pass_check:
+            if (applies_to and row["category"] not in applies_to and suite_of(row) not in applies_to
+                    and not is_must_pass_check):
                 continue
             if row["id"] in blocked:
                 if name == must_pass_criterion:

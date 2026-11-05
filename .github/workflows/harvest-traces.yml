@@ -1,11 +1,12 @@
-# Weekly trace harvest: real conversations -> candidate test cases -> pull request for human review.
+# Trace harvest: real conversations -> candidate test cases -> pull request for human review.
 # Candidates are appended to eval/dataset.jsonl with "needs_review": true; Gate 1a rejects that flag,
 # so nothing reaches the quality gate until a reviewer accepts (removes the flag) or deletes each case.
+# The weekly schedule is paused while v1 focuses on the release gates; run it by hand when needed.
 name: harvest-traces
 
 on:
-  schedule:
-    - cron: "0 11 * * 1"   # Mondays 11:00 UTC (07:00 Toronto)
+  # schedule:
+  #   - cron: "0 11 * * 1"   # Mondays 11:00 UTC (07:00 Toronto)
   workflow_dispatch:
     inputs:
       days:
@@ -35,9 +36,6 @@ jobs:
     timeout-minutes: 30
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
-      KB_SERVER_LABEL: ${{ vars.KB_SERVER_LABEL }}
-      KB_SERVER_URL: ${{ vars.KB_SERVER_URL }}
-      KB_CONNECTION_ID: ${{ vars.KB_CONNECTION_ID }}
     defaults:
       run:
         working-directory: cicd
