@@ -6,8 +6,8 @@ Every release has to pass a two-suite evaluation and an AI red-teaming scan. A h
 | Step | Job | Runs on | Passes when |
 |---|---|---|---|
 | 1a | `ci` | every PR and push | unit tests pass, every environment config renders, eval data and red-team policy are valid (no Azure calls) |
-| — | `deploy-dev` | push to `main`, release tags | a new version of the agent is created in `opgagentdev`, recorded and passes the smoke checks |
-| 1b | `quality-gate` | push to `main`, release tags | Foundry cloud evaluation of that dev version: every must-pass case passes and every judge meets its floor |
+| — | `deploy-dev` | push to `main`, release tags | a new version of the agent is created in `opgagentdev` (only if its definition or model changed), recorded, and passes the smoke checks |
+| 1b | `quality-gate` | push to `main`, release tags | Foundry cloud evaluation of that dev version: every must-pass case passes and every judge meets its floor. A passing run is reused when nothing that affects the result changed |
 | 2 | `redteam-gate` | release tags `shift-manager-v*` (or manual `force_redteam`) | Foundry AI Red Teaming: every blocking category within its limit, with enough attacks to prove it |
 | Packet | `release-packet` | release tags | always runs after dev deploy and builds the approval packet, even when a gate fails |
 | 3 | `deploy-prod` | release tags | the required reviewer approves the `prod` environment; the same commit is deployed to `opgagentprod` and must pass the smoke checks, or it rolls back automatically |
@@ -24,6 +24,22 @@ Every gate **fails closed**: an API error, a missing result, an incomplete run o
 | | | `sm-operational-safety` | 100% |
 
 The custom judges are registered in the dev project; their prompts are mirrored in `eval/judges.json`. Each suite runs as its own Foundry evaluation run, and the report links to both. A judge sees only `reference_facts`, so those must state everything the document says that an answer may repeat. Each fact block carries the document's current revision, and the severe accident guide (SAM) rows carry the full flowchart text. Without those facts the judges marked correct answers as wrong.
+
+## Not paying twice for the same answer
+
+Each gate checks whether it already has a valid result before running:
+
+| What | Reused when | Otherwise |
+|---|---|---|
+| Dev agent version | The latest version was deployed by the pipeline with the same fingerprint (definition + model version) | A new version is created |
+| Gate 1b evaluation | A completed run less than `reuse_days` (30) old has the same *quality key* (agent fingerprint, all test cases, `thresholds.json`, judge criteria) and still passes today's rules | A new evaluation runs (~0.67M tokens) |
+| Gate 2 red-team scan | A completed scan less than 30 days old has the same fingerprint and policy hash, and still passes | A new scan runs (~0.4M tokens, ~45 min) |
+
+The approval packet says when a result was reused and where it came from.
+- **Force a fresh run:** start the workflow manually with `force_eval` or `force_redteam`.
+- **One Foundry evaluation per suite and judge set:** each run is added to that evaluation's history, so the portal stays readable.
+- **Previous red-team scans:** Foundry's evaluation list does not return red-team evaluations, so the red-team job downloads the last few `redteam-gate-report` artifacts to find earlier scans. They are only pointers: every candidate scan is re-read from Foundry and re-decided before it is reused.
+- **Docs-only changes:** changes to `cicd/**/*.md` don't trigger the pipeline.
 
 ## Gate 2: red teaming
 
@@ -115,8 +131,9 @@ cicd/
 | Merge to `main` | 1a → deploy a new dev version → 1b. Stops there |
 | `git tag shift-manager-v1.0.0` then `git push sandbox shift-manager-v1.0.0` | 1a → dev → 1b → 2 → packet → waits for the approver → prod deploy → smoke (or rollback) |
 | *Actions → shift-manager-cicd → Run workflow* with `force_redteam` | dev → 1b → fresh red-team scan → packet, no prod |
+| *Run workflow* with `force_eval` | dev → a fresh Gate 1b even if a passing one exists |
 
-A release takes about 1–1.5 hours when a new red-team scan is needed (about 110 attack conversations), and about 20 minutes when a scan is reused.
+A release takes about 1–1.5 hours when a new red-team scan is needed (about 110 attack conversations). When the agent and tests are unchanged since the last passing runs, both gates are reused and the release reaches the approver in a few minutes.
 
 ## Run locally
 

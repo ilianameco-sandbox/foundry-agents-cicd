@@ -1,7 +1,8 @@
 # v1 CI/CD for the Shift Manager agent (shiftmanageragent-promptv3).
 #   Gate 1a  ci              every PR and push: unit tests, render every env, validate eval data and red-team policy
 #   Gate 1b  quality-gate    push to main + release tags: Foundry evaluation of the recorded dev version
-#                            (21 must-pass behavior cases + 94 golden document questions with the Shift Manager judges)
+#                            (21 must-pass behavior cases + 94 golden document questions with the Shift Manager judges),
+#                            reused when agent, cases, bars and judges are unchanged (input force_eval re-runs it)
 #   Gate 2   redteam-gate    release tags (or manual force): Foundry AI Red Teaming of that version,
 #                            reused when the agent fingerprint has not changed in the last 30 days
 #   Packet   release-packet  release tags: one approval packet (job summary, HTML artifact, GitHub issue, Teams)
@@ -10,15 +11,20 @@ name: shift-manager-cicd
 
 on:
   pull_request:
-    paths: ["cicd/**", ".github/workflows/shift-manager-cicd.yml", ".github/workflows/agent-deploy.yml"]
+    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/shift-manager-cicd.yml", ".github/workflows/agent-deploy.yml"]
   push:
     branches: [main]
-    paths: ["cicd/**", ".github/workflows/shift-manager-cicd.yml", ".github/workflows/agent-deploy.yml"]
+    # Docs-only changes don't deploy or evaluate; tag pushes ignore path filters.
+    paths: ["cicd/**", "!cicd/**/*.md", ".github/workflows/shift-manager-cicd.yml", ".github/workflows/agent-deploy.yml"]
     tags: ["shift-manager-v*"]
   workflow_dispatch:
     inputs:
       force_redteam:
         description: Run the red-team gate and build an approval packet (no prod deploy without a release tag)
+        type: boolean
+        default: false
+      force_eval:
+        description: Run a new Gate 1b evaluation even if a passing one exists for the same agent, cases and judges
         type: boolean
         default: false
 
@@ -100,7 +106,10 @@ jobs:
       - name: Foundry evaluation of the recorded version (fail closed)
         run: >-
           python -m agent_cicd.quality_gate --agent-dir "$AGENT_DIR" --env dev
-          --version "${{ needs.deploy-dev.outputs.agent_version }}" --report out/quality.json
+          --version "${{ needs.deploy-dev.outputs.agent_version }}"
+          --fingerprint "${{ needs.deploy-dev.outputs.fingerprint }}"
+          ${{ github.event.inputs.force_eval == 'true' && '--force' || '' }}
+          --report out/quality.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -115,6 +124,10 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
     timeout-minutes: 300
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
     env:
       FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
     defaults:
@@ -133,12 +146,28 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Fetch earlier red-team reports (Foundry can't list red-team evaluations)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p in/previous
+          n=0
+          for id in $(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=redteam-gate-report&per_page=20" \
+                        --jq '.artifacts[] | select(.expired == false) | .id' | head -n 5); do
+            n=$((n + 1))
+            dir="in/previous/$(printf '%02d' "$n")-${id}"
+            mkdir -p "$dir"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" > "$dir/report.zip" \
+              && unzip -q -o "$dir/report.zip" -d "$dir" || echo "could not read artifact ${id}"
+          done
+          echo "earlier reports: $(find in/previous -name redteam.json | wc -l)"
       - name: Red-team the recorded version, or reuse a passing scan of the same fingerprint
         run: >-
           python -m agent_cicd.redteam_gate --agent-dir "$AGENT_DIR" --env dev
           --version "${{ needs.deploy-dev.outputs.agent_version }}"
           --fingerprint "${{ needs.deploy-dev.outputs.fingerprint }}"
           ${{ github.event.inputs.force_redteam == 'true' && '--force' || '' }}
+          --previous-dir in/previous
           --report out/redteam.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

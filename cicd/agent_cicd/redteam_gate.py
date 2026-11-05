@@ -3,10 +3,14 @@
 A scan is skipped only when a completed scan in the last `reuse_days` days covered the identical
 fingerprint (definition + model version) under the identical policy and still passes the gate today.
 
+Foundry's evaluation list does not return red-team evaluations, so the gate cannot find earlier scans on its
+own. The pipeline passes earlier gate reports (--previous-dir); their eval and run ids are only pointers, and
+every candidate is re-read from Foundry and re-decided under today's policy before it is reused.
+
 Examples:
   python -m agent_cicd.redteam_gate --agent-dir agents/shift-manager --env dev --validate-only
   python -m agent_cicd.redteam_gate --agent-dir agents/shift-manager --env dev --version 5 \
-      --fingerprint <sha256> --report out/redteam.json [--force]
+      --fingerprint <sha256> --report out/redteam.json [--previous-dir in/previous] [--force]
 """
 
 from __future__ import annotations
@@ -60,31 +64,71 @@ def _criteria(policy: dict[str, Any], judge_deployment: str) -> list[dict[str, A
     return criteria
 
 
-def _find_or_create_eval(openai_client, policy: dict[str, Any], judge_deployment: str):
-    for evaluation in openai_client.evals.list(limit=100):
-        if evaluation.name == policy["eval_name"]:
+def known_scans(previous_dir: Path | None) -> list[tuple[str, str]]:
+    """(eval_id, run_id) pointers from earlier gate reports, newest first (folders are numbered by the pipeline)."""
+    pairs: list[tuple[str, str]] = []
+    if not previous_dir or not previous_dir.exists():
+        return pairs
+    for path in sorted(previous_dir.rglob("redteam.json")):
+        try:
+            details = json.loads(path.read_text(encoding="utf-8"))["result"]["details"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if details.get("eval_id") and details.get("run_id"):
+            pairs.append((str(details["eval_id"]), str(details["run_id"])))
+    return list(dict.fromkeys(pairs))
+
+
+def _criteria_hash(criteria: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(json.dumps(criteria, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _find_or_create_eval(openai_client, policy: dict[str, Any], judge_deployment: str, known_eval_ids: list[str]):
+    criteria = _criteria(policy, judge_deployment)
+    wanted = _criteria_hash(criteria)
+    for eval_id in dict.fromkeys(known_eval_ids):
+        try:
+            evaluation = openai_client.evals.retrieve(eval_id)
+        except Exception:  # noqa: BLE001 - a stale pointer just means "not found"
+            continue
+        if evaluation.name == policy["eval_name"] and (evaluation.metadata or {}).get("criteria") == wanted:
             return evaluation
     return openai_client.evals.create(
         name=policy["eval_name"],
         data_source_config={"type": "azure_ai_source", "scenario": "red_team"},
-        testing_criteria=_criteria(policy, judge_deployment),
+        testing_criteria=criteria,
+        metadata={"criteria": wanted},
     )
 
 
-def _reusable_run(openai_client, eval_id: str, agent_name: str, agent_fingerprint: str, policy: dict[str, Any]):
-    """Return (run, items, result) for the newest passing scan of the same fingerprint and policy, or None."""
+def _reusable_run(openai_client, eval_id: str, known: list[tuple[str, str]], agent_name: str,
+                  agent_fingerprint: str, policy: dict[str, Any]):
+    """Return (eval_id, run, items, result) for the newest passing scan of the same fingerprint and policy, or None."""
     cutoff = time.time() - float(policy.get("reuse_days", 30)) * 86400
     wanted = {"agent_name": agent_name, "fingerprint": agent_fingerprint[:32], "policy": policy_hash(policy)}
+    candidates: dict[str, tuple[str, Any]] = {}
     for run in openai_client.evals.runs.list(eval_id=eval_id, limit=50, order="desc"):
+        candidates[run.id] = (eval_id, run)
+    names: dict[str, str] = {eval_id: policy["eval_name"]}
+    for other_eval, run_id in known:
+        if run_id in candidates:
+            continue
+        try:
+            if other_eval not in names:
+                names[other_eval] = openai_client.evals.retrieve(other_eval).name
+            candidates[run_id] = (other_eval, openai_client.evals.runs.retrieve(run_id=run_id, eval_id=other_eval))
+        except Exception:  # noqa: BLE001 - deleted or foreign pointers are skipped
+            continue
+    for owner, run in sorted(candidates.values(), key=lambda c: c[1].created_at or 0, reverse=True):
         metadata = run.metadata or {}
-        if run.status != "completed" or (run.created_at or 0) < cutoff:
+        if names.get(owner) != policy["eval_name"] or run.status != "completed" or (run.created_at or 0) < cutoff:
             continue
         if any(metadata.get(key) != value for key, value in wanted.items()):
             continue
-        items = [to_plain(i) for i in openai_client.evals.runs.output_items.list(run_id=run.id, eval_id=eval_id)]
+        items = [to_plain(i) for i in openai_client.evals.runs.output_items.list(run_id=run.id, eval_id=owner)]
         result = decide_redteam(run.status, items, policy)
         if result.allows_promotion:
-            return run, items, result
+            return owner, run, items, result
     return None
 
 
@@ -152,20 +196,25 @@ def _prepare_taxonomy(client, name: str, target, policy: dict[str, Any], version
 
 
 def run_redteam_gate(agent_dir: Path, environment: str, version: str, agent_fingerprint: str,
-                     force: bool, report: Path | None) -> GateResult:
+                     force: bool, report: Path | None, previous_dir: Path | None = None) -> GateResult:
     from azure.ai.projects.models import AzureAIAgentTarget
 
     rendered = render_agent(agent_dir, environment, require_configured=True)
     policy = load_policy(agent_dir)
+    known = known_scans(previous_dir)
+    print(f"[redteam] {len(known)} earlier scan pointer(s) from previous reports", flush=True)
     with project_client(rendered.project_endpoint) as client, client.get_openai_client() as openai_client:
-        evaluation = _find_or_create_eval(openai_client, policy, rendered.judge_deployment)
+        evaluation = _find_or_create_eval(openai_client, policy, rendered.judge_deployment, [e for e, _ in known])
 
         if not force:
-            reused = _reusable_run(openai_client, evaluation.id, rendered.agent_name, agent_fingerprint, policy)
+            reused = _reusable_run(openai_client, evaluation.id, known, rendered.agent_name, agent_fingerprint, policy)
             if reused:
-                run, items, result = reused
-                result.reasons.insert(0, f"Reused scan {run.id}: same agent fingerprint and policy, still passing")
-                result.details.update({"eval_id": evaluation.id, "run_id": run.id, "reused": True,
+                owner, run, items, result = reused
+                when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(run.created_at or 0))
+                result.reasons.insert(0, f"Reused scan {run.id} from {when} (agent version "
+                                         f"{(run.metadata or {}).get('agent_version')}): same agent fingerprint and "
+                                         "policy, still passing, no new attacks run")
+                result.details.update({"eval_id": owner, "run_id": run.id, "reused": True,
                                        "report_url": getattr(run, "report_url", None)})
                 write_report(report, {"result": result.to_dict(), "run": to_plain(run), "output_items": items})
                 return result
@@ -217,6 +266,8 @@ def main() -> int:
     parser.add_argument("--fingerprint", help="Fingerprint recorded by the deploy step")
     parser.add_argument("--force", action="store_true", help="Always run a new scan")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--previous-dir", type=Path,
+                        help="Folder with earlier redteam.json reports, used to find scans to reuse")
     parser.add_argument("--results-file", type=Path, help="Decide from a downloaded results .jsonl (offline)")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
@@ -232,7 +283,8 @@ def main() -> int:
         if not args.version or not args.fingerprint:
             parser.error("--version and --fingerprint are required to run the gate")
         try:
-            result = run_redteam_gate(args.agent_dir, args.env, args.version, args.fingerprint, args.force, args.report)
+            result = run_redteam_gate(args.agent_dir, args.env, args.version, args.fingerprint, args.force, args.report,
+                                      args.previous_dir)
         except Exception as error:  # noqa: BLE001 - any unexpected error fails the gate closed
             result = GateResult(gate="redteam", outcome=FAIL,
                                 reasons=[f"Gate error (fail closed): {type(error).__name__}: {error}"])

@@ -26,16 +26,17 @@ def _model_version(client, deployment_name: str) -> str:
     return f"{deployment.get('modelName') or deployment.get('model_name')}@{version}"
 
 
-def _latest_version(client, agent_name: str) -> str:
+def _latest_version(client, agent_name: str) -> tuple[str, dict]:
     from azure.core.exceptions import ResourceNotFoundError
     try:
         details = client.agents.get(agent_name=agent_name).as_dict()
     except ResourceNotFoundError:
-        return ""
-    return str((details.get("versions") or {}).get("latest", {}).get("version", ""))
+        return "", {}
+    latest = (details.get("versions") or {}).get("latest") or {}
+    return str(latest.get("version", "")), latest.get("metadata") or {}
 
 
-def deploy(agent_dir: Path, environment: str, dry_run: bool) -> int:
+def deploy(agent_dir: Path, environment: str, dry_run: bool, force_new: bool = False) -> int:
     rendered = render_agent(agent_dir, environment)
     if dry_run:
         print(json.dumps({"environment": environment, "agent_name": rendered.agent_name,
@@ -52,7 +53,15 @@ def deploy(agent_dir: Path, environment: str, dry_run: bool) -> int:
     with project_client(rendered.project_endpoint) as client:
         model_version = _model_version(client, rendered.definition["model"])
         agent_fingerprint = fingerprint(rendered.definition, model_version)
-        previous = _latest_version(client, rendered.agent_name)
+        previous, previous_metadata = _latest_version(client, rendered.agent_name)
+        # The latest version already runs this exact definition and model: keep it instead of adding an
+        # identical version (and leave nothing to roll back to, since nothing changed).
+        if (not force_new and previous and previous_metadata.get("deployed_by") == "agent-cicd"
+                and previous_metadata.get("fingerprint") == agent_fingerprint[:32]):
+            print(f"Unchanged: version {previous} already has fingerprint {agent_fingerprint[:12]}; not creating a new one")
+            set_outputs(agent_name=rendered.agent_name, agent_version=previous, previous_version="",
+                        fingerprint=agent_fingerprint, model_version=model_version, unchanged="true")
+            return 0
         created = client.agents.create_version(
             agent_name=rendered.agent_name,
             definition=PromptAgentDefinition(rendered.definition),
@@ -64,7 +73,7 @@ def deploy(agent_dir: Path, environment: str, dry_run: bool) -> int:
             },
         )
     set_outputs(agent_name=rendered.agent_name, agent_version=str(created.version),
-                previous_version=previous, fingerprint=agent_fingerprint, model_version=model_version)
+                previous_version=previous, fingerprint=agent_fingerprint, model_version=model_version, unchanged="false")
     return 0
 
 
@@ -89,11 +98,13 @@ def main() -> int:
     parser.add_argument("--env", required=True)
     parser.add_argument("--dry-run", action="store_true", help="Render the definition without calling Azure")
     parser.add_argument("--rollback-to", help="Recreate this earlier version as the newest version")
+    parser.add_argument("--force-new-version", action="store_true",
+                        help="Create a version even when the latest one has the same fingerprint")
     args = parser.parse_args()
     try:
         if args.rollback_to:
             return rollback(args.agent_dir, args.env, args.rollback_to)
-        return deploy(args.agent_dir, args.env, args.dry_run)
+        return deploy(args.agent_dir, args.env, args.dry_run, args.force_new_version)
     except DefinitionError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1

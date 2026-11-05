@@ -3,11 +3,16 @@
 Examples:
   python -m agent_cicd.quality_gate --agent-dir agents/shift-manager --env dev --validate-only
   python -m agent_cicd.quality_gate --agent-dir agents/shift-manager --env dev --version 5 --report out/quality.json
+  python -m agent_cicd.quality_gate --agent-dir agents/shift-manager --env dev --version 5 --fingerprint <sha256>
+
+A passing run is reused (no new tokens) when the agent fingerprint, test cases, thresholds and judges are all
+unchanged and the run is younger than `reuse_days` in thresholds.json; --force always runs a new evaluation.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -104,7 +109,67 @@ def _item(row: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Path | None) -> GateResult:
+def _hash(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def quality_key(agent_fingerprint: str, dataset: list[dict[str, Any]], thresholds: dict[str, Any],
+                criteria_by_suite: dict[str, list[dict[str, Any]]]) -> str:
+    """Everything that can change a Gate 1b result: the agent (definition + model), the cases, the bars and judges."""
+    return _hash({"fingerprint": agent_fingerprint, "dataset": dataset, "thresholds": thresholds,
+                  "criteria": criteria_by_suite})[:32]
+
+
+def _find_or_create_eval(openai_client, name: str, criteria: list[dict[str, Any]], item_schema: dict[str, Any],
+                         metadata: dict[str, str]):
+    for evaluation in openai_client.evals.list(limit=100):
+        if evaluation.name == name:
+            return evaluation
+    return openai_client.evals.create(
+        name=name,
+        data_source_config={"type": "custom", "item_schema": item_schema, "include_sample_schema": True},
+        testing_criteria=criteria,
+        metadata=metadata,
+    )
+
+
+def _items(openai_client, eval_id: str, run_id: str) -> list[dict[str, Any]]:
+    return [to_plain(item) for item in openai_client.evals.runs.output_items.list(run_id=run_id, eval_id=eval_id)]
+
+
+def _overlay(items: list[dict[str, Any]], fresh_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fresh = {(i.get("datasource_item") or {}).get("id"): i for i in fresh_items}
+    return [fresh.get((i.get("datasource_item") or {}).get("id"), i) for i in items]
+
+
+def previous_runs(openai_client, evals: dict[str, Any], suites: dict[str, dict[str, Any]], key: str,
+                  reuse_days: float) -> dict[str, tuple[Any, list[dict[str, Any]]]] | None:
+    """The newest completed full run of every suite with the same quality key, re-scores applied; None if any is missing."""
+    cutoff = time.time() - reuse_days * 86400
+    found = {}
+    for name, evaluation in evals.items():
+        runs = list(openai_client.evals.runs.list(eval_id=evaluation.id, limit=50, order="desc"))
+        for run in runs:
+            metadata = run.metadata or {}
+            if (metadata.get("rescore_of") or metadata.get("quality_key") != key or run.status != "completed"
+                    or (run.created_at or 0) < cutoff):
+                continue
+            items = _items(openai_client, evaluation.id, run.id)
+            if len(items) != len(suites[name]["rows"]):
+                continue
+            rescores = sorted((r for r in runs if (r.metadata or {}).get("rescore_of") == run.id
+                               and r.status == "completed"), key=lambda r: r.created_at or 0)
+            for rescore in rescores:
+                items = _overlay(items, _items(openai_client, evaluation.id, rescore.id))
+            found[name] = (run, items)
+            break
+        else:
+            return None
+    return found
+
+
+def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Path | None,
+                     agent_fingerprint: str = "", force: bool = False) -> GateResult:
     rendered = render_agent(agent_dir, environment, require_configured=True)
     eval_dir = agent_dir / "eval"
     thresholds = json.loads((eval_dir / "thresholds.json").read_text(encoding="utf-8"))
@@ -117,19 +182,22 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
     item_schema = {"type": "object", "properties": {k: {"type": v} for k, v in ITEM_FIELDS.items()},
                    "required": ["id", "query", "suite"]}
     target = {"type": "azure_ai_agent", "name": rendered.agent_name, "version": str(version)}
+    criteria = {name: build_criteria(thresholds, rendered.judge_deployment, spec["criteria"])
+                for name, spec in suites.items()}
+    key = quality_key(agent_fingerprint, dataset, thresholds, criteria) if agent_fingerprint else ""
     metadata = {"agent_name": rendered.agent_name, "agent_version": str(version),
-                "git_sha": os.environ.get("GITHUB_SHA", "local")[:40], "gate": "quality"}
+                "git_sha": os.environ.get("GITHUB_SHA", "local")[:40], "gate": "quality", "quality_key": key}
 
-    # One Foundry evaluation per suite so each suite only pays for (and reports) its own judges.
     runs: dict[str, dict[str, Any]] = {}
     retries: dict[str, list[dict[str, Any]]] = {}
     timeout = float(thresholds.get("timeout_minutes", 45))
+    reused = None
 
-    def start_run(openai_client, eval_id: str, name: str, rows: list[dict[str, Any]], label: str):
+    def start_run(openai_client, eval_id: str, name: str, rows: list[dict[str, Any]], label: str, extra=None):
         return openai_client.evals.runs.create(
             eval_id=eval_id,
             name=f"{rendered.agent_name} v{version} quality gate ({label})",
-            metadata={**metadata, "suite": name},
+            metadata={**metadata, "suite": name, **(extra or {})},
             data_source={
                 "type": "azure_ai_target_completions",
                 "source": {"type": "file_content", "content": [{"item": _item(row)} for row in rows]},
@@ -141,24 +209,38 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
         )
 
     with project_client(rendered.project_endpoint) as client, client.get_openai_client() as openai_client:
-        for name, spec in suites.items():
-            evaluation = openai_client.evals.create(
-                name=f"agent-cicd-quality-{rendered.agent_name}-{name}",
-                data_source_config={"type": "custom", "item_schema": item_schema, "include_sample_schema": True},
-                testing_criteria=build_criteria(thresholds, rendered.judge_deployment, spec["criteria"]),
-                metadata={**metadata, "suite": name},
-            )
-            runs[name] = {"eval_id": evaluation.id, "run": start_run(openai_client, evaluation.id, name, spec["rows"], name)}
+        # One Foundry evaluation per suite and judge set, reused across pipeline runs; its runs are the history.
+        evals = {name: _find_or_create_eval(
+            openai_client, f"agent-cicd-quality-{rendered.agent_name}-{name}-{_hash([criteria[name], item_schema])[:8]}",
+            criteria[name], item_schema, {"agent_name": rendered.agent_name, "gate": "quality", "suite": name})
+            for name in suites}
+
+        # Same agent, cases, bars and judges as a recent passing run: reuse it instead of spending tokens again.
+        if key and not force:
+            previous = previous_runs(openai_client, evals, suites, key, float(thresholds.get("reuse_days", 30)))
+            if previous:
+                candidate = decide_quality("completed", dataset, [i for _, items in previous.values() for i in items],
+                                           thresholds)
+                if candidate.allows_promotion:
+                    reused = previous
+
         items: list[dict[str, Any]] = []
-        for name, entry in runs.items():
+        if reused:
+            for name, (run, suite_items) in reused.items():
+                runs[name] = {"eval_id": evals[name].id, "run": run}
+                items += suite_items
+        else:
+            for name, spec in suites.items():
+                runs[name] = {"eval_id": evals[name].id,
+                              "run": start_run(openai_client, evals[name].id, name, spec["rows"], name)}
+        for name, entry in ({} if reused else runs).items():
             eval_id = entry["eval_id"]
             run = wait_for_run(lambda: openai_client.evals.runs.retrieve(run_id=entry["run"].id, eval_id=eval_id),
                                timeout, f"quality:{name}")
             entry["run"] = run
             if run.status != "completed":
                 continue
-            suite_items = [to_plain(item) for item in openai_client.evals.runs.output_items.list(
-                run_id=run.id, eval_id=eval_id)]
+            suite_items = _items(openai_client, eval_id, run.id)
             # A judge call that failed (usually HTTP 429 when the judge deployment is busy) is not a verdict:
             # re-run just those cases, up to twice, and keep the fresh result for each.
             for attempt in (1, 2):
@@ -167,16 +249,15 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
                     break
                 time.sleep(60 * attempt)
                 rows = [row for row in suites[name]["rows"] if row["id"] in retry_ids]
-                retry = start_run(openai_client, eval_id, name, rows, f"{name} re-score {attempt}")
+                retry = start_run(openai_client, eval_id, name, rows, f"{name} re-score {attempt}",
+                                  {"rescore_of": run.id})
                 retry = wait_for_run(lambda: openai_client.evals.runs.retrieve(run_id=retry.id, eval_id=eval_id),
                                      timeout, f"quality:{name}:retry{attempt}")
                 retries.setdefault(name, []).append({"run_id": retry.id, "status": retry.status,
                                                      "cases": sorted(retry_ids)})
                 if retry.status != "completed":
                     break
-                fresh = {(i.get("datasource_item") or {}).get("id"): i for i in (to_plain(x) for x in
-                         openai_client.evals.runs.output_items.list(run_id=retry.id, eval_id=eval_id))}
-                suite_items = [fresh.get((i.get("datasource_item") or {}).get("id"), i) for i in suite_items]
+                suite_items = _overlay(suite_items, _items(openai_client, eval_id, retry.id))
             items += suite_items
 
     statuses = {name: entry["run"].status for name, entry in runs.items()}
@@ -190,8 +271,17 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
         "suites": {name: {"eval_id": e["eval_id"], "run_id": e["run"].id, "status": e["run"].status,
                           "cases": len(suites[name]["rows"]), "report_url": getattr(e["run"], "report_url", None)}
                    for name, e in runs.items()},
-        "judge_retries": retries,
+        "judge_retries": retries, "quality_key": key, "reused": bool(reused),
     })
+    if reused:
+        original = next(iter(reused.values()))[0]
+        meta = original.metadata or {}
+        when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(original.created_at or 0))
+        result.details["reused_from"] = {"agent_version": meta.get("agent_version"), "git_sha": meta.get("git_sha"),
+                                         "created": when}
+        result.reasons.insert(0, f"Reused the passing evaluation from {when} (agent version {meta.get('agent_version')}, "
+                                 f"commit {str(meta.get('git_sha'))[:7]}): same agent definition and model, test cases, "
+                                 "bars and judges, so no new tokens were spent")
     write_report(report, {"result": result.to_dict(),
                           "runs": {name: to_plain(e["run"]) for name, e in runs.items()},
                           "output_items": items})
@@ -203,6 +293,9 @@ def main() -> int:
     parser.add_argument("--agent-dir", type=Path, required=True)
     parser.add_argument("--env", required=True)
     parser.add_argument("--version", help="Agent version recorded by the deploy step")
+    parser.add_argument("--fingerprint", default="",
+                        help="Agent fingerprint from the deploy step; enables reuse of a matching passing run")
+    parser.add_argument("--force", action="store_true", help="Always run a new evaluation")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--from-report", type=Path, help="Re-decide a saved report offline (no Azure calls)")
     parser.add_argument("--validate-only", action="store_true", help="Check dataset and thresholds offline")
@@ -242,12 +335,12 @@ def main() -> int:
         parser.error("--version is required unless --validate-only is set")
 
     try:
-        result = run_quality_gate(args.agent_dir, args.env, args.version, args.report)
+        result = run_quality_gate(args.agent_dir, args.env, args.version, args.report, args.fingerprint, args.force)
     except Exception as error:  # noqa: BLE001 - any unexpected error fails the gate closed
         result = GateResult(gate="quality", outcome=FAIL, reasons=[f"Gate error (fail closed): {type(error).__name__}: {error}"])
     link = result.details.get("report_url")
     add_summary(to_markdown(result, header=f"Foundry run: {link}" if link else ""))
-    set_outputs(quality_outcome=result.outcome)
+    set_outputs(quality_outcome=result.outcome, quality_reused=str(result.details.get("reused", False)).lower())
     return 0 if result.allows_promotion else 1
 
 
