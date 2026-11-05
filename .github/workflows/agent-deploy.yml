@@ -68,7 +68,7 @@ jobs:
             [ -n "${!name}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
-            echo "::error::GitHub Environment '${{ inputs.environment }}' is missing variables:$missing (see cicd/README.md, One-time setup)"
+            echo "::error::GitHub Environment '${{ inputs.environment }}' is missing secrets:$missing (see cicd/README.md, One-time setup)"
             exit 1
           fi
       - uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1

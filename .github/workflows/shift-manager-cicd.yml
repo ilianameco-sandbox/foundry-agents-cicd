@@ -63,6 +63,7 @@ jobs:
       group: shift-manager-dev-deploy
       cancel-in-progress: false
     uses: ./.github/workflows/agent-deploy.yml
+    secrets: inherit
     with:
       environment: dev
       agent_dir: agents/shift-manager
@@ -218,6 +219,7 @@ jobs:
       group: shift-manager-prod-deploy
       cancel-in-progress: false
     uses: ./.github/workflows/agent-deploy.yml
+    secrets: inherit
     with:
       environment: prod
       agent_dir: agents/shift-manager
