@@ -103,11 +103,12 @@ cicd/
     eval/judges.json      copy of the custom judge prompts
     eval/redteam.json     risk categories, limits, success rule, strategies, reuse window
     eval/smoke.json       post-deploy smoke checks (capability + one cited document answer)
-  agent_cicd/             deploy, smoke, quality_gate, redteam_gate, release_report, harvest + pure gate logic (gates.py)
+  agent_cicd/             deploy, smoke, quality_gate, redteam_gate, release_report, promote, harvest + pure gate logic (gates.py)
   tests/                  offline unit tests (legacy fixtures in tests/fixtures/legacy)
 .github/workflows/
   shift-manager-cicd.yml  the pipeline
   agent-deploy.yml        reusable deploy (create version → record → smoke → optional rollback)
+  promote-portal-agent.yml  manual: agent version built in the Foundry portal → pull request
   harvest-traces.yml      manual: real conversations → candidate test cases → pull request
 ```
 
@@ -127,6 +128,7 @@ cicd/
 
 | You do | Pipeline does |
 |---|---|
+| *Actions → promote-portal-agent → Run workflow* with a dev agent version | Exports that portal version into `agent.json` + `instructions.md` and opens a PR (nothing deployed) |
 | Open a PR touching `cicd/` | Step 1a only |
 | Merge to `main` | 1a → deploy a new dev version → 1b. Stops there |
 | `git tag shift-manager-v1.0.0` then `git push sandbox shift-manager-v1.0.0` | 1a → dev → 1b → 2 → packet → waits for the approver → prod deploy → smoke (or rollback) |
@@ -134,6 +136,28 @@ cicd/
 | *Run workflow* with `force_eval` | dev → a fresh Gate 1b even if a passing one exists |
 
 A release takes about 1–1.5 hours when a new red-team scan is needed (about 110 attack conversations). When the agent and tests are unchanged since the last passing runs, both gates are reused and the release reaches the approver in a few minutes.
+
+## Building in the Foundry portal
+
+The pipeline deploys from the repo files, never from the portal. If you build or tweak the agent in the **dev** project's portal, promote it into the files:
+
+1. Test the agent in the portal and note its version number (or use `latest`).
+2. Go to **GitHub → Actions → promote-portal-agent → Run workflow** and enter the version.
+3. The workflow reads that version from the dev project and writes the instructions, reasoning and tools into `instructions.md` and `agent.json`. Environment-specific values such as the index asset go back to `${VARIABLES}`.
+4. It checks that the files render to exactly that portal definition and that Gate 1a's tests pass, then opens a pull request with the diff.
+5. Review and merge. The normal pipeline takes over: dev deploy, smoke checks and evaluation; then a release tag, red teaming, approval and prod.
+
+**It refuses to guess when a change needs a human decision:**
+- a different model deployment, which must exist in prod too;
+- a new tool, connection or index with no prod value in `config/prod.json` (`variables`);
+- a definition field the pipeline doesn't deploy yet, such as `temperature`.
+
+The run summary says what to add. The workflow never reads from or writes to prod.
+
+- **Setup:** turn on *Settings → Actions → General → Allow GitHub Actions to create and approve pull requests*. If it's off, the workflow pushes the branch and shows a link to open the PR yourself.
+- **Gate 1a on the PR:** PRs opened by Actions don't start workflows, so Gate 1a runs after merge, or when someone pushes a commit to the PR branch.
+
+Locally: `python -m agent_cicd.promote --agent-dir agents/shift-manager --version 12 --dry-run`
 
 ## Run locally
 
