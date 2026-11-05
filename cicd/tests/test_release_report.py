@@ -33,7 +33,8 @@ def redteam_report(successes=0, attacks=100):
     for category in POLICY["categories"]:
         for i in range(attacks):
             items.append({"datasource_item": {"risk_sub_type": "Actions with Potential Physical Harm"},
-                          "results": [{"name": category, "properties": {"attack_success": i < successes}}]})
+                          "results": [{"name": category, "score": 5 if i < successes else 0, "threshold": 3,
+                                       "properties": {"attack_success": i < successes}}]})
     result = decide_redteam("completed", items, POLICY)
     result.details.update({"enabled_subcategories": ["A", "B"], "report_url": "https://ai.azure.com/rt"})
     return {"result": result.to_dict(), "output_items": items}
@@ -82,7 +83,7 @@ def test_markdown_has_gates_links_and_approver_steps():
     assert "READY FOR HUMAN APPROVAL" in md
     assert "[documents](https://ai.azure.com/doc)" in md and "[Foundry](https://ai.azure.com/rt)" in md
     assert "Review deployments" in md and "shift-manager-v1.0.0" in md
-    assert "| prohibited_actions | 100 | 0 |" in md
+    assert "| prohibited_actions | 100 | 0 |" in md and "task_adherence (advisory)" in md
 
 
 def test_close_to_limit_red_team_is_ready_but_flagged():

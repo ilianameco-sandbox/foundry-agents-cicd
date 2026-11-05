@@ -140,6 +140,11 @@ def build_packet(quality: dict[str, Any] | None, redteam: dict[str, Any] | None,
 
 # ---------------------------------------------------------------- markdown
 
+def _flag_note(row: dict[str, Any]) -> str:
+    n = row.get("contradictions") or 0
+    return f" ({n} service flags disagree with the evaluator score)" if n else ""
+
+
 def render_markdown(packet: dict[str, Any]) -> str:
     c, q, r = packet["context"], packet["quality"], packet["redteam"]
     if packet["ready"]:
@@ -191,8 +196,9 @@ def render_markdown(packet: dict[str, Any]) -> str:
                   f"{len(r['enabled_subcategories'])} prohibited-action sub-categories · {r.get('attacks')} scored attacks",
                   "", "| Risk category | Attacks | Successful | ASR | 95% upper bound | Limit | Outcome |",
                   "|---|---|---|---|---|---|---|"]
-        lines += [f"| {row['category']} | {row['attacks']} | {row['successes']} | {row['asr']:.1%} | {row['upper_bound']:.1%} | "
-                  f"{row['limit']:.0%} | {ICON.get(row['outcome'], '')} {row['outcome']} |" for row in r["categories"]]
+        lines += [f"| {row['category']}{' (advisory)' if row.get('advisory') else ''} | {row['attacks']} | {row['successes']} | "
+                  f"{row['asr']:.1%} | {row['upper_bound']:.1%} | {row['limit']:.0%} | {ICON.get(row['outcome'], '')} {row['outcome']}"
+                  f"{_flag_note(row)} |" for row in r["categories"]]
         if r["by_subcategory"]:
             lines += ["", "Successful attacks by sub-category: "
                       + ", ".join(f"{name} ({k}/{n})" for name, k, n in r["by_subcategory"][:10])]
@@ -287,8 +293,9 @@ details{{margin:8px 0}} li{{margin:4px 0}}
                   f"<p class='muted'>Attack strategies: {e(', '.join(r['strategies']))} · {e(str(r['turns']))} turns · "
                   f"{len(r['enabled_subcategories'])} prohibited-action sub-categories · {e(str(r.get('attacks')))} scored attacks</p>",
                   _table(["Risk category", "Attacks", "Successful", "ASR", "95% upper bound", "Limit", "Outcome"],
-                         [[e(row["category"]), str(row["attacks"]), str(row["successes"]), f"{row['asr']:.1%}",
-                           f"{row['upper_bound']:.1%}", f"{row['limit']:.0%}", _badge(row["outcome"])] for row in r["categories"]])]
+                         [[e(row["category"]) + (" <span class='muted'>(advisory)</span>" if row.get("advisory") else ""),
+                           str(row["attacks"]), str(row["successes"]), f"{row['asr']:.1%}", f"{row['upper_bound']:.1%}",
+                           f"{row['limit']:.0%}", _badge(row["outcome"]) + e(_flag_note(row))] for row in r["categories"]])]
         if r["by_subcategory"]:
             parts.append(_table(["Sub-category with successful attacks", "Successful / attempted"],
                                 [[e(name), f"{k}/{n}"] for name, k, n in r["by_subcategory"]]))

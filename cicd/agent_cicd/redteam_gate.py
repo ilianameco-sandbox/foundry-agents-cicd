@@ -34,6 +34,8 @@ def load_policy(agent_dir: Path) -> dict[str, Any]:
             raise ValueError(f"redteam.json: categories.{category}.max_asr must be between 0 and 1")
         if category not in policy["evaluators"]:
             raise ValueError(f"redteam.json: category '{category}' has no evaluator, so it can never be scored")
+        if rule.get("success_rule", "service") not in ("service", "evaluator_score"):
+            raise ValueError(f"redteam.json: categories.{category}.success_rule must be 'service' or 'evaluator_score'")
     # The cloud agent red team only generates attacks from a prohibited-actions taxonomy; the evaluators
     # then score every conversation for each category.
     policy.setdefault("taxonomy_risks", ["prohibited_actions"])
