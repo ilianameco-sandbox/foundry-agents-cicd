@@ -97,18 +97,28 @@ def _prepare_taxonomy(client, name: str, target, policy: dict[str, Any], version
     from azure.ai.projects.models import AgentTaxonomyInput, EvaluationTaxonomy, RiskCategory
     from azure.core.exceptions import HttpResponseError
 
-    # `get` on a missing taxonomy returns HTTP 500 rather than 404, so check existence by listing.
-    if any(t.name == name for t in client.beta.evaluation_taxonomies.list()):
+    # `get` on a missing taxonomy returns HTTP 500 rather than 404, and `list` breaks after the first page
+    # (its next link is an internal http:// URL), so try `get` and treat 404/500 as "not created yet".
+    try:
         taxonomy = client.beta.evaluation_taxonomies.get(name=name)
-    else:
-        taxonomy = client.beta.evaluation_taxonomies.create(
-            name=name,
-            taxonomy=EvaluationTaxonomy(
-                description=f"Red-team gate taxonomy for {target.name} v{version}",
-                taxonomy_input=AgentTaxonomyInput(
-                    risk_categories=[RiskCategory[c.upper()] for c in policy["taxonomy_risks"]], target=target),
-            ),
-        )
+    except HttpResponseError as error:
+        if error.status_code not in (404, 500):
+            raise
+        taxonomy = None
+    if taxonomy is None:
+        try:
+            taxonomy = client.beta.evaluation_taxonomies.create(
+                name=name,
+                taxonomy=EvaluationTaxonomy(
+                    description=f"Red-team gate taxonomy for {target.name} v{version}",
+                    taxonomy_input=AgentTaxonomyInput(
+                        risk_categories=[RiskCategory[c.upper()] for c in policy["taxonomy_risks"]], target=target),
+                ),
+            )
+        except HttpResponseError as error:
+            if error.status_code != 409:
+                raise
+            taxonomy = client.beta.evaluation_taxonomies.get(name=name)
     # Sub-categories are generated asynchronously; wait for them before editing.
     deadline = time.monotonic() + 600
     body = taxonomy.as_dict()

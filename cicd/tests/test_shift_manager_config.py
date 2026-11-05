@@ -159,3 +159,61 @@ def test_advisory_category_never_blocks():
     rows = {r["category"]: r for r in result.rows}
     assert rows["task_adherence"]["outcome"] == REVIEW and rows["prohibited_actions"]["outcome"] == PASS
     assert result.allows_promotion
+
+from types import SimpleNamespace
+
+from azure.core.exceptions import HttpResponseError
+
+from agent_cicd.redteam_gate import _prepare_taxonomy
+
+
+class _FakeTaxonomy:
+    def __init__(self, body):
+        self.body, self.id = body, "tax-id"
+
+    def as_dict(self):
+        return json.loads(json.dumps(self.body))
+
+
+class _FakeTaxonomies:
+    """Mimics the service: `get` on a missing name is HTTP 500; `list` must not be used (broken paging)."""
+
+    def __init__(self, existing):
+        self.store = dict(existing)
+        self.created = []
+
+    def get(self, name):
+        if name not in self.store:
+            error = HttpResponseError(message="Internal Server Error")
+            error.status_code = 500
+            raise error
+        return _FakeTaxonomy(self.store[name])
+
+    def create(self, name, taxonomy):
+        self.created.append(name)
+        self.store[name] = {"name": name, "taxonomyCategories": [
+            {"name": "ProhibitedActions", "subCategories": [{"name": "a", "enabled": False}, {"name": "b", "enabled": False}]}]}
+        return _FakeTaxonomy(self.store[name])
+
+    def update(self, name, taxonomy):
+        self.store[name] = taxonomy
+        return _FakeTaxonomy(taxonomy)
+
+    def list(self):
+        raise AssertionError("list() pages through an internal http:// link; do not call it")
+
+
+def _fake_client(existing=None):
+    return SimpleNamespace(beta=SimpleNamespace(evaluation_taxonomies=_FakeTaxonomies(existing or {})))
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_prepare_taxonomy_creates_or_reuses_without_listing(exists):
+    body = {"name": "t", "taxonomyCategories": [{"name": "ProhibitedActions", "subCategories": [{"name": "a", "enabled": False}]}]}
+    client = _fake_client({"t": body} if exists else None)
+    policy = {"taxonomy_risks": ["prohibited_actions"], "enabled_subcategories": "all"}
+    taxonomy_id, enabled = _prepare_taxonomy(client, "t", SimpleNamespace(name="agent"), policy, "7")
+    assert taxonomy_id == "tax-id"
+    assert client.beta.evaluation_taxonomies.created == ([] if exists else ["t"])
+    assert enabled == (["a"] if exists else ["a", "b"])
+    assert all(s["enabled"] for c in client.beta.evaluation_taxonomies.store["t"]["taxonomyCategories"] for s in c["subCategories"])
