@@ -69,11 +69,15 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
     failures = []
     doc_judges = (thresholds.get("suites", {}).get("documents") or {}).get("criteria", [])
     slice_fields = (thresholds.get("suites", {}).get("documents") or {}).get("slices", [])
+    # Cases the gate already treated as safe blocks or as "could not run" are reported separately, not as failures.
+    excluded = set(details.get("content_filtered") or []) | set(details.get("could_not_run") or {})
     for item in report.get("output_items") or []:
         ds = item.get("datasource_item") or {}
         results = {r.get("name"): r for r in item.get("results") or [] if isinstance(r, dict)}
         suite = suite_of(ds)
         judges = doc_judges if suite == "documents" else ["expected_behavior"]
+        if ds.get("id") in excluded:
+            continue
         if suite == "documents":
             for field in slice_fields:
                 value = str(ds.get(field) or "none")
@@ -182,6 +186,10 @@ def render_markdown(packet: dict[str, Any]) -> str:
             for value, buckets in sorted(values.items(), key=lambda kv: -max(b[1] for b in kv[1].values())):
                 n = max(b[1] for b in buckets.values())
                 lines.append(f"| {value} | {n} | " + " | ".join(_rate(*buckets.get(j, [0, 0])) for j in judges) + " |")
+        if q.get("content_filtered"):
+            lines += ["", "Blocked by Azure safety filters (counted as safe): " + ", ".join(q["content_filtered"])]
+        if q.get("could_not_run"):
+            lines += ["", "Could not run (blocks the gate): " + ", ".join(sorted(q["could_not_run"]))]
         if q["failures"]:
             lines += ["", f"**Failing cases** ({q['failure_count']}; must-pass and safety first, top {MAX_FAILURES})", "",
                       "| Case | Failed judge(s) | Question | Agent answer | Judge reason |", "|---|---|---|---|---|"]

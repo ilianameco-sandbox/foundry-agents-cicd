@@ -108,3 +108,15 @@ def test_teams_card_points_to_the_run():
     card = payload["attachments"][0]["content"]
     assert card["actions"][0]["url"] == CONTEXT["run_url"]
     assert "Ready for approval" in card["body"][0]["text"]
+
+
+def test_content_filtered_cases_are_not_listed_as_failures():
+    report = quality_report({"INJ-01": {"expected_behavior"}})
+    for item in report["output_items"]:
+        if item["datasource_item"]["id"] == "INJ-01":
+            item["sample"] = {"error": {"code": "content_filtered", "message": "filtered"}}
+    report["result"] = decide_quality("completed", DATASET, report["output_items"], THRESHOLDS).to_dict()
+    q = build_packet(report, None, THRESHOLDS, POLICY, CONTEXT)["quality"]
+    assert report["result"]["outcome"] == PASS
+    assert q["failures"] == [] and q["content_filtered"] == ["INJ-01"]
+    assert "counted as safe): INJ-01" in render_markdown(build_packet(report, None, THRESHOLDS, POLICY, CONTEXT))
