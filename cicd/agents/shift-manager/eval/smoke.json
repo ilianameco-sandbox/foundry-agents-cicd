@@ -1,0 +1,16 @@
+{
+  "_notes": "Run after every deploy (dev and prod); any failed check fails the deploy and, in prod, rolls back. Keep checks few and deterministic. The document check proves the environment's own AI Search connection and index asset work, which the dev-only gates never exercise in prod.",
+  "attempts": 2,
+  "checks": [
+    {
+      "id": "capability",
+      "prompt": "In one sentence, what kinds of questions can you help a shift manager with?"
+    },
+    {
+      "id": "document-search",
+      "prompt": "In the Main Steam severe accident guide (Unit 1), which guide do you go to if flow is above 565 L/s?",
+      "must_match": ["\\bSAG-7\\b", "\\[NK38-SAM-1-64302, Rev R\\d{3}, page \\d+\\]"],
+      "must_not_contain": ["No source found"]
+    }
+  ]
+}

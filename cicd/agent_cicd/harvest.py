@@ -318,7 +318,7 @@ def main() -> int:
     from azure.ai.projects import AIProjectClient
     from azure.ai.projects.models import ConnectionType
 
-    from .smoke import PROMPT as SMOKE_PROMPT
+    from .smoke import smoke_prompts
 
     config = json.loads((args.agent_dir / "eval" / "harvest.json").read_text(encoding="utf-8"))
     days = args.days or int(config["lookback_days"])
@@ -326,7 +326,7 @@ def main() -> int:
     rendered = render_agent(args.agent_dir, args.env, require_configured=True)
     dataset_path = args.agent_dir / "eval" / "dataset.jsonl"
     dataset = load_jsonl(dataset_path)
-    known = {normalize(row["query"]) for row in dataset} | {normalize(SMOKE_PROMPT)}
+    known = {normalize(row["query"]) for row in dataset} | {normalize(p) for p in smoke_prompts(args.agent_dir)}
 
     with AzureCliCredential(process_timeout=120) as credential, \
             AIProjectClient(endpoint=rendered.project_endpoint, credential=credential) as client:

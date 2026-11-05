@@ -6,11 +6,11 @@ Every release has to pass a two-suite evaluation and an AI red-teaming scan. A h
 | Step | Job | Runs on | Passes when |
 |---|---|---|---|
 | 1a | `ci` | every PR and push | unit tests pass, every environment config renders, eval data and red-team policy are valid (no Azure calls) |
-| — | `deploy-dev` | push to `main`, release tags | a new version of the agent is created in `opgagentdev`, recorded and smoke-tested |
+| — | `deploy-dev` | push to `main`, release tags | a new version of the agent is created in `opgagentdev`, recorded and passes the smoke checks |
 | 1b | `quality-gate` | push to `main`, release tags | Foundry cloud evaluation of that dev version: every must-pass case passes and every judge meets its floor |
 | 2 | `redteam-gate` | release tags `shift-manager-v*` (or manual `force_redteam`) | Foundry AI Red Teaming: every blocking category within its limit, with enough attacks to prove it |
 | Packet | `release-packet` | release tags | always runs after dev deploy and builds the approval packet, even when a gate fails |
-| 3 | `deploy-prod` | release tags | the required reviewer approves the `prod` environment; the same commit is deployed to `opgagentprod` and smoke-tested, with automatic rollback |
+| 3 | `deploy-prod` | release tags | the required reviewer approves the `prod` environment; the same commit is deployed to `opgagentprod` and must pass the smoke checks, or it rolls back automatically |
 
 Every gate **fails closed**: an API error, a missing result, an incomplete run or too few cases blocks promotion. Outcomes are `PASS`, `REVIEW` (passes, flagged for the approver), `INCONCLUSIVE` and `FAIL`; only the first two continue.
 
@@ -44,6 +44,17 @@ Workarounds for the service as of Nov 2026 (`azure-ai-projects` 2.3.0) are in `_
   - It flags every label/score disagreement as a contradiction, which turns PASS into REVIEW so the approver checks a sample.
 - **Sensitive-data-leakage:** returns no results for taxonomy attacks. Content harms are covered by Azure content filters, not this scan.
 
+## Smoke checks after every deploy
+
+`eval/smoke.json` runs right after each deploy, in dev and in prod, against the exact new version:
+
+| Check | Prompt | Passes when |
+|---|---|---|
+| `capability` | "In one sentence, what kinds of questions can you help a shift manager with?" | any non-empty answer: login, model deployment and instructions work |
+| `document-search` | golden question GQ-067 (Main Steam severe accident guide, Unit 1) | the answer contains `SAG-7` and a citation `[NK38-SAM-1-64302, Rev R…, page …]`, and does not say "No source found" |
+
+The document check matters most in prod. Prod uses its own AI Search connection (`opgagentaisearch-prod`), and the evaluation and red-team gates only run in dev, so this is the first time the prod search wiring is tested. Each check gets 2 attempts. If any check still fails, the deploy fails, and in prod it rolls back to the previous version. On the very first prod deploy there is nothing to roll back to, so the job just fails.
+
 ## Approval packet
 
 `release_report.py` merges both gate reports into one packet:
@@ -75,6 +86,7 @@ cicd/
     eval/thresholds.json  suites, judges and floors
     eval/judges.json      copy of the custom judge prompts
     eval/redteam.json     risk categories, limits, success rule, strategies, reuse window
+    eval/smoke.json       post-deploy smoke checks (capability + one cited document answer)
   agent_cicd/             deploy, smoke, quality_gate, redteam_gate, release_report, harvest + pure gate logic (gates.py)
   tests/                  offline unit tests (legacy fixtures in tests/fixtures/legacy)
 .github/workflows/

@@ -54,6 +54,7 @@ jobs:
         run: |
           python -m agent_cicd.quality_gate --agent-dir "$AGENT_DIR" --env dev --validate-only
           python -m agent_cicd.redteam_gate --agent-dir "$AGENT_DIR" --env dev --validate-only
+          python -m agent_cicd.smoke --agent-dir "$AGENT_DIR" --env dev --validate-only
 
   deploy-dev:
     name: Deploy to dev
