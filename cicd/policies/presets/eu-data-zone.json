@@ -1,0 +1,13 @@
+{
+  "description": "EU Data Boundary: processing may move between EU regions (Data Zone EU), data stored in the EU",
+  "rules": {
+    "model_region": {"severity": "block", "allowed_regions": ["westeurope", "northeurope", "swedencentral", "francecentral", "francesouth", "germanywestcentral", "germanynorth", "italynorth", "polandcentral", "spaincentral"]},
+    "model_deployment_type": {"severity": "block", "allowed_skus": ["Standard", "ProvisionedManaged", "DataZoneStandard", "DataZoneProvisionedManaged", "DataZoneBatch"]},
+    "data_store_region": {"severity": "block", "allowed_regions": ["westeurope", "northeurope", "swedencentral", "francecentral", "francesouth", "germanywestcentral", "germanynorth", "italynorth", "polandcentral", "spaincentral"]},
+    "content_filter": {"severity": "block", "why": "Every model deployment needs an Azure AI content filter policy"},
+    "prompt_shields": {"severity": "block", "why": "Jailbreak attempts in user prompts are detected and blocked"},
+    "key_auth_disabled": {"severity": "warn", "why": "Only Entra ID identities can call the resource (no shared API keys)"},
+    "private_network": {"severity": "warn", "why": "The Foundry resource is reachable only through private endpoints"},
+    "tracing_enabled": {"severity": "block", "environments": ["test"], "why": "UAT feedback and traces are recorded in Application Insights"}
+  }
+}

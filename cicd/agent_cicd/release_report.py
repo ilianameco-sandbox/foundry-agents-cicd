@@ -29,8 +29,10 @@ from .foundry import add_summary, set_outputs
 from .gates import FAIL, INCONCLUSIVE, PASS, REVIEW, judge_error, suite_of
 
 NOT_RUN = "NOT RUN"
-ICON = {PASS: "✅", REVIEW: "🔍", INCONCLUSIVE: "⚠️", FAIL: "❌", NOT_RUN: "⛔"}
-COLOR = {PASS: "#2e7d32", REVIEW: "#b26a00", INCONCLUSIVE: "#8d6e00", FAIL: "#c62828", NOT_RUN: "#616161"}
+HUMAN = "HUMAN"
+ICON = {PASS: "✅", REVIEW: "🔍", INCONCLUSIVE: "⚠️", FAIL: "❌", NOT_RUN: "⛔", HUMAN: "👤"}
+COLOR = {PASS: "#2e7d32", REVIEW: "#b26a00", INCONCLUSIVE: "#8d6e00", FAIL: "#c62828", NOT_RUN: "#616161",
+         HUMAN: "#1565c0"}
 MAX_FAILURES = 15
 
 
@@ -76,7 +78,11 @@ def quality_section(report: dict[str, Any] | None, thresholds: dict[str, Any]) -
         ds = item.get("datasource_item") or {}
         results = {r.get("name"): r for r in item.get("results") or [] if isinstance(r, dict)}
         suite = suite_of(ds)
-        judges = doc_judges if suite == "documents" else ["expected_behavior"]
+        judges = (thresholds.get("suites", {}).get(suite) or {}).get("criteria") or (
+            doc_judges if suite == "documents" else ["expected_behavior"])
+        # A criterion that skips this case's category (e.g. groundedness on "no source" questions) isn't a failure.
+        judges = [j for j in judges
+                  if str(ds.get("category")) not in (criteria.get(j, {}).get("exclude_categories") or [])]
         if ds.get("id") in excluded:
             continue
         if suite == "documents":
@@ -136,13 +142,78 @@ def redteam_section(report: dict[str, Any] | None, policy: dict[str, Any]) -> di
     }
 
 
+def policy_section(reports: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    """G2 config & residency, one entry per environment checked before its deploy."""
+    envs = {}
+    for env, report in reports.items():
+        if report is None:
+            envs[env] = {"outcome": NOT_RUN, "reasons": [f"No config & residency report for {env}"], "rows": []}
+            continue
+        result = report.get("result") or {}
+        envs[env] = {"outcome": result.get("outcome", NOT_RUN), "reasons": result.get("reasons") or [],
+                     "rows": result.get("rows") or [], "details": result.get("details") or {}}
+    order = {PASS: 0, REVIEW: 1, INCONCLUSIVE: 2, FAIL: 3, NOT_RUN: 4}
+    outcome = max((e["outcome"] for e in envs.values()), key=lambda o: order.get(o, 4), default=NOT_RUN)
+    return {"outcome": outcome, "environments": envs}
+
+
+# Microsoft Responsible AI principles → the evidence this pipeline produces for each.
+RAI_PRINCIPLES = {
+    "reliability_safety": "Reliability & safety",
+    "privacy_security": "Privacy & security",
+    "transparency": "Transparency",
+    "fairness": "Fairness",
+    "inclusiveness": "Inclusiveness",
+    "accountability": "Accountability",
+}
+_MANUAL = {
+    "fairness": "No automated check yet: the RAI reviewer reviews answers for different user groups and units",
+    "inclusiveness": "No automated check yet: the business owner confirms UAT testers represent the real users",
+    "accountability": "QA, business owner and RAI sign-offs, then the release manager (G5/G6); every decision is "
+                      "recorded on the run and the release issue",
+}
+
+
+def rai_scorecard(q: dict[str, Any], r: dict[str, Any], p: dict[str, Any], thresholds: dict[str, Any]) -> list[dict]:
+    criteria = thresholds.get("criteria", {})
+    default_principle = {"expected_behavior": "reliability_safety", "answer_correctness": "reliability_safety",
+                         "operational_safety": "reliability_safety", "citation_accuracy": "transparency"}
+    evidence: dict[str, list[tuple[str, str]]] = {key: [] for key in RAI_PRINCIPLES}
+    for row in q.get("criteria") or []:
+        principle = criteria.get(row["criterion"], {}).get("rai_principle") or default_principle.get(row["criterion"])
+        if principle in evidence:
+            evidence[principle].append((f"{row['criterion']} {row['pass_rate']:.0%} (bar {row['floor']:.0%})",
+                                        row["outcome"]))
+    for row in r.get("categories") or []:
+        evidence["reliability_safety"].append((f"red team {row['category']}: ASR {row['asr']:.1%}", row["outcome"]))
+    for env, entry in p.get("environments", {}).items():
+        d = entry.get("details") or {}
+        evidence["privacy_security"].append(
+            (f"config & residency ({env}): {d.get('would_block', '?')} would block, {d.get('warnings', '?')} warnings",
+             entry["outcome"]))
+    order = {PASS: 0, REVIEW: 1, INCONCLUSIVE: 2, FAIL: 3, NOT_RUN: 4}
+    card = []
+    for key, title in RAI_PRINCIPLES.items():
+        items = evidence[key]
+        if items:
+            status = max((o for _, o in items), key=lambda o: order.get(o, 4))
+            card.append({"principle": title, "status": status, "evidence": [t for t, _ in items]})
+        else:
+            card.append({"principle": title, "status": "HUMAN", "evidence": [_MANUAL.get(key, "Not covered")]})
+    return card
+
+
 def build_packet(quality: dict[str, Any] | None, redteam: dict[str, Any] | None, thresholds: dict[str, Any],
-                 policy: dict[str, Any], context: dict[str, str]) -> dict[str, Any]:
+                 policy: dict[str, Any], context: dict[str, str],
+                 policies: dict[str, dict[str, Any] | None] | None = None) -> dict[str, Any]:
     q = quality_section(quality, thresholds)
     r = redteam_section(redteam, policy)
-    ready = q["outcome"] in (PASS, REVIEW) and r["outcome"] in (PASS, REVIEW)
-    flagged = REVIEW in (q["outcome"], r["outcome"])
-    return {"ready": ready, "flagged": flagged, "quality": q, "redteam": r, "context": context}
+    p = policy_section(policies or {})
+    gates = [q["outcome"], r["outcome"]] + ([p["outcome"]] if policies else [])
+    ready = all(o in (PASS, REVIEW) for o in gates)
+    flagged = REVIEW in gates
+    return {"ready": ready, "flagged": flagged, "quality": q, "redteam": r, "policy": p,
+            "scorecard": rai_scorecard(q, r, p, thresholds), "context": context}
 
 
 # ---------------------------------------------------------------- markdown
@@ -153,32 +224,53 @@ def _flag_note(row: dict[str, Any]) -> str:
 
 
 def render_markdown(packet: dict[str, Any]) -> str:
-    c, q, r = packet["context"], packet["quality"], packet["redteam"]
+    c, q, r, p = packet["context"], packet["quality"], packet["redteam"], packet.get("policy") or {}
     if packet["ready"]:
-        verdict = "🟢 **READY FOR HUMAN APPROVAL**" + (" (some results are flagged for review)" if packet["flagged"] else "")
+        verdict = "🟢 **READY FOR SIGN-OFF**" + (" (some results are flagged for review)" if packet["flagged"] else "")
     else:
-        verdict = "🔴 **BLOCKED: do not approve.** Prod deployment will not be offered for this run."
+        verdict = "🔴 **BLOCKED: do not approve.** Sign-off and prod deployment will not be offered for this run."
+    test_version = f" · version **{c['test_version']}** in test" if c.get("test_version") else ""
     lines = [
         f"# Release approval packet: {c.get('agent_name')} {c.get('tag') or ''}".rstrip(),
         "",
         verdict,
         "",
         "| | |", "|---|---|",
-        f"| Agent | `{c.get('agent_name')}` version **{c.get('version')}** in dev |",
+        f"| Agent | `{c.get('agent_name')}` version **{c.get('version')}** in dev{test_version} |",
         f"| Fingerprint | `{(c.get('fingerprint') or '')[:16]}` (definition + model `{c.get('model_version')}`) |",
         f"| Commit | `{(c.get('sha') or '')[:12]}` |",
         f"| Pipeline run | {c.get('run_url') or 'local'} |",
         "",
         "## Gates",
         "| Gate | Outcome | Summary | Evidence |", "|---|---|---|---|",
-        f"| 1b · Evaluation | {ICON[q['outcome']]} {q['outcome']} | {_clip('; '.join(q['reasons']), 220)} | "
+    ]
+    for env, entry in (p.get("environments") or {}).items():
+        lines.append(f"| G2 · Config & residency ({env}) | {ICON.get(entry['outcome'], '')} {entry['outcome']} | "
+                     f"{_clip('; '.join(entry['reasons']), 220)} | policy.json |")
+    lines += [
+        f"| G3 · Evaluation | {ICON[q['outcome']]} {q['outcome']} | {_clip('; '.join(q['reasons']), 220)} | "
         + (" · ".join(f"[{n}]({s['report_url']})" for n, s in q.get("suites", {}).items() if s.get("report_url")) or "–") + " |",
-        f"| 2 · AI red teaming | {ICON[r['outcome']]} {r['outcome']}{' (reused scan)' if r.get('reused') else ''} | "
+        f"| G4 · AI red teaming | {ICON[r['outcome']]} {r['outcome']}{' (reused scan)' if r.get('reused') else ''} | "
         f"{_clip('; '.join(r['reasons']), 220)} | " + (f"[Foundry]({r['report_url']})" if r.get("report_url") else "–") + " |",
         "",
     ]
+    if packet.get("scorecard"):
+        lines += ["## Responsible AI scorecard", "| Principle | Status | Evidence |", "|---|---|---|"]
+        lines += [f"| {row['principle']} | {ICON.get(row['status'], '')} {row['status']} | "
+                  f"{_clip('; '.join(row['evidence']), 300)} |" for row in packet["scorecard"]]
+        lines += ["", "👤 = judged by a person at sign-off, not by an automated check.", ""]
+    for env, entry in (p.get("environments") or {}).items():
+        flagged_rows = [row for row in entry.get("rows") or [] if row.get("status") != "ok"]
+        if flagged_rows:
+            d = entry.get("details") or {}
+            lines += [f"## G2 · Config & residency findings ({env})",
+                      f"Preset `{d.get('preset')}`, enforcement `{d.get('enforcement')}`.", "",
+                      "| Rule | Resource | Status | Finding |", "|---|---|---|---|"]
+            lines += [f"| {row['rule']} | {row['subject']} | {row['status']} | {_clip(row['finding'], 200)} |"
+                      for row in flagged_rows]
+            lines.append("")
     if q.get("criteria"):
-        lines += ["## 1b · Evaluation results", "| Criterion | Suite | Passed | Pass rate | Bar | Outcome |",
+        lines += ["## G3 · Evaluation results", "| Criterion | Suite | Passed | Pass rate | Bar | Outcome |",
                   "|---|---|---|---|---|---|"]
         lines += [f"| {row['criterion']} | {row['suite']} | {row['passed']}/{row['scored']} | {row['pass_rate']:.1%} | "
                   f"{row['floor']:.0%} | {ICON.get(row['outcome'], '')} {row['outcome']} |" for row in q["criteria"]]
@@ -204,7 +296,7 @@ def render_markdown(packet: dict[str, Any]) -> str:
                              f"{_clip(f['answer'], 140)} | {_clip(f['reason'], 220)} |".replace("\n", " "))
         lines.append("")
     if r.get("categories"):
-        lines += ["## 2 · AI red teaming results",
+        lines += ["## G4 · AI red teaming results",
                   f"Attack strategies: {', '.join(r['strategies'])} · {r['turns']} turns · "
                   f"{len(r['enabled_subcategories'])} prohibited-action sub-categories · {r.get('attacks')} scored attacks",
                   "", "| Risk category | Attacks | Successful | ASR | 95% upper bound | Limit | Outcome |",
@@ -217,18 +309,21 @@ def render_markdown(packet: dict[str, Any]) -> str:
                       + ", ".join(f"{name} ({k}/{n})" for name, k, n in r["by_subcategory"][:10])]
         lines.append("")
     lines += [
-        "## For the approver",
-        "Approving deploys **the exact definition above** (same fingerprint) to the prod Foundry project, then smoke-tests it "
-        "and rolls back automatically if the smoke test fails.",
+        "## For the sign-off reviewers",
+        "Each role approves its own environment on the [pipeline run]" + (f"({c.get('run_url')})" if c.get("run_url") else "")
+        + " → *Review deployments*: `signoff-qa` (QA), `signoff-business` (business owner, after UAT in the test "
+        "project) and `signoff-rai` (Responsible AI). The pipeline then checks the UAT ratings and the sign-offs, and "
+        "the release manager approves `prod`. Prod gets **the exact definition above** (same fingerprint), is "
+        "smoke-tested, and rolls back automatically if the smoke test fails.",
         "",
-        "- [ ] Every gate is green, or each 🔍 flagged result is understood and acceptable",
-        "- [ ] The failing cases above are acceptable for this release (none are must-pass 🔒 or safety)",
-        "- [ ] Red-team limits are met for every risk category",
-        "- [ ] Known limits: content harms (hate, sexual, violence, self-harm) are covered by Azure content filters, not this scan; "
-        "IndirectJailbreak is not supported for this agent",
+        "- [ ] QA: every gate is green, or each 🔍 flagged result is understood; failing cases are acceptable "
+        "(none are must-pass 🔒 or safety); red-team limits are met",
+        "- [ ] Business owner: testers used the release candidate in the test project and rated at least the agreed "
+        "number of answers (checked automatically after you approve)",
+        "- [ ] RAI reviewer: the scorecard above, the privacy results and the residency findings are acceptable",
+        "- [ ] Known limits: content harms (hate, sexual, violence, self-harm) are covered by Azure content filters, not "
+        "the red-team scan; IndirectJailbreak is not supported for this agent; identity (persona) tests are not built yet",
         "",
-        f"**To decide:** open the [pipeline run]({c.get('run_url')}) → *Review deployments* → `prod` → Approve or Reject with a comment."
-        if c.get("run_url") else "",
     ]
     return "\n".join(lines).rstrip() + "\n"
 
@@ -276,15 +371,24 @@ details{{margin:8px 0}} li{{margin:4px 0}}
              ]),
              "<h2>Gates</h2>",
              _table(["Gate", "Outcome", "Summary", "Evidence"], [
-                 ["1b · Evaluation", _badge(q["outcome"]), "<br>".join(e(x) for x in q["reasons"]),
+                 *[[f"G2 · Config &amp; residency ({e(env)})", _badge(entry["outcome"]),
+                    "<br>".join(e(x) for x in entry["reasons"]), "policy.json"]
+                   for env, entry in (packet.get("policy") or {}).get("environments", {}).items()],
+                 ["G3 · Evaluation", _badge(q["outcome"]), "<br>".join(e(x) for x in q["reasons"]),
                   " · ".join(f'<a href="{e(s["report_url"])}">{e(n)}</a>' for n, s in q.get("suites", {}).items()
                              if s.get("report_url")) or "–"],
-                 ["2 · AI red teaming", _badge(r["outcome"]) + (" <span class='muted'>reused scan</span>" if r.get("reused") else ""),
+                 ["G4 · AI red teaming", _badge(r["outcome"]) + (" <span class='muted'>reused scan</span>" if r.get("reused") else ""),
                   "<br>".join(e(x) for x in r["reasons"]),
                   f'<a href="{e(r["report_url"])}">Foundry</a>' if r.get("report_url") else "–"],
              ])]
+    if packet.get("scorecard"):
+        parts += ["<h2>Responsible AI scorecard</h2>",
+                  _table(["Principle", "Status", "Evidence"],
+                         [[e(row["principle"]), _badge(row["status"]), "<br>".join(e(x) for x in row["evidence"])]
+                          for row in packet["scorecard"]]),
+                  "<p class='muted'>HUMAN = judged by a person at sign-off, not by an automated check.</p>"]
     if q.get("criteria"):
-        parts += ["<h2>1b · Evaluation results</h2>",
+        parts += ["<h2>G3 · Evaluation results</h2>",
                   _table(["Criterion", "Suite", "Passed", "Pass rate", "Bar", "Outcome"],
                          [[e(row["criterion"]), e(row["suite"]), f"{row['passed']}/{row['scored']}", f"{row['pass_rate']:.1%}",
                            f"{row['floor']:.0%}", _badge(row["outcome"])] for row in q["criteria"]])]
@@ -302,7 +406,7 @@ details{{margin:8px 0}} li{{margin:4px 0}}
                                e(_clip(f["query"], 300)), e(_clip(f["answer"], 500)), e(_clip(f["reason"], 600))]
                               for f in q["failures"]])]
     if r.get("categories"):
-        parts += ["<h2>2 · AI red teaming results</h2>",
+        parts += ["<h2>G4 · AI red teaming results</h2>",
                   f"<p class='muted'>Attack strategies: {e(', '.join(r['strategies']))} · {e(str(r['turns']))} turns · "
                   f"{len(r['enabled_subcategories'])} prohibited-action sub-categories · {e(str(r.get('attacks')))} scored attacks</p>",
                   _table(["Risk category", "Attacks", "Successful", "ASR", "95% upper bound", "Limit", "Outcome"],
@@ -315,16 +419,21 @@ details{{margin:8px 0}} li{{margin:4px 0}}
         if r["enabled_subcategories"]:
             parts.append("<details><summary>Sub-categories tested</summary><ul>"
                          + "".join(f"<li>{e(s)}</li>" for s in r["enabled_subcategories"]) + "</ul></details>")
-    parts += ["<h2>For the approver</h2>",
-              "<p>Approving deploys <b>the exact definition above</b> (same fingerprint) to the prod Foundry project, then "
-              "smoke-tests it and rolls back automatically if the smoke test fails.</p><ul>"
-              "<li>Every gate is green, or each flagged result is understood and acceptable</li>"
-              "<li>The failing cases are acceptable for this release (none are must-pass 🔒 or safety)</li>"
-              "<li>Red-team limits are met for every risk category</li>"
+    parts += ["<h2>For the sign-off reviewers</h2>",
+              "<p>QA approves <code>signoff-qa</code>, the business owner approves <code>signoff-business</code> after UAT "
+              "in the test project, and the Responsible AI reviewer approves <code>signoff-rai</code>. The pipeline then "
+              "checks the UAT ratings and the sign-offs, and the release manager approves <code>prod</code>. Prod gets "
+              "<b>the exact definition above</b> (same fingerprint), is smoke-tested, and rolls back automatically if the "
+              "smoke test fails.</p><ul>"
+              "<li>QA: every gate is green, or each flagged result is understood; failing cases are acceptable "
+              "(none are must-pass 🔒 or safety); red-team limits are met</li>"
+              "<li>Business owner: testers used the release candidate and rated enough answers</li>"
+              "<li>RAI reviewer: the scorecard, privacy results and residency findings are acceptable</li>"
               "<li>Known limits: content harms (hate, sexual, violence, self-harm) are covered by Azure content filters, not "
-              "this scan; IndirectJailbreak is not supported for this agent</li></ul>",
-              (f'<p><b>To decide:</b> open the <a href="{e(c["run_url"])}">pipeline run</a> → <i>Review deployments</i> → '
-               f'<code>prod</code> → Approve or Reject with a comment.</p>') if c.get("run_url") else "",
+              "the red-team scan; IndirectJailbreak is not supported for this agent; identity (persona) tests are not "
+              "built yet</li></ul>",
+              (f'<p><b>To decide:</b> open the <a href="{e(c["run_url"])}">pipeline run</a> → <i>Review deployments</i>.</p>')
+              if c.get("run_url") else "",
               "</body></html>"]
     return "\n".join(parts)
 
@@ -361,7 +470,10 @@ def main() -> int:
     parser.add_argument("--agent-dir", type=Path, required=True)
     parser.add_argument("--quality", type=Path)
     parser.add_argument("--redteam", type=Path)
+    parser.add_argument("--policy-report", action="append", default=[], metavar="ENV=PATH",
+                        help="G2 config & residency report for one environment (repeatable)")
     parser.add_argument("--version", default="")
+    parser.add_argument("--test-version", default="")
     parser.add_argument("--fingerprint", default="")
     parser.add_argument("--model-version", default="")
     parser.add_argument("--agent-name", default="")
@@ -374,10 +486,15 @@ def main() -> int:
     policy = json.loads((eval_dir / "redteam.json").read_text(encoding="utf-8"))
     server, repo, run_id = (os.environ.get(k, "") for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
     context = {"agent_name": args.agent_name, "version": args.version, "fingerprint": args.fingerprint,
+               "test_version": args.test_version,
                "model_version": args.model_version, "sha": os.environ.get("GITHUB_SHA", "local"),
                "tag": os.environ.get("GITHUB_REF_NAME", "") if os.environ.get("GITHUB_REF_TYPE") == "tag" else "",
                "run_url": f"{server}/{repo}/actions/runs/{run_id}" if run_id else ""}
-    packet = build_packet(_load(args.quality), _load(args.redteam), thresholds, policy, context)
+    policies = {}
+    for entry in args.policy_report:
+        env, _, path = entry.partition("=")
+        policies[env] = _load(Path(path))
+    packet = build_packet(_load(args.quality), _load(args.redteam), thresholds, policy, context, policies or None)
 
     markdown = render_markdown(packet)
     for path, text in ((args.markdown, markdown), (args.html, render_html(packet) if args.html else None)):

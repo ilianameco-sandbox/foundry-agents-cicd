@@ -1,24 +1,28 @@
 # Foundry Agents CI/CD
 
-A GitHub Actions pipeline that promotes a Microsoft Foundry prompt agent from dev to production through quality, safety and human gates. Each gate fails closed.
+A GitHub Actions pipeline that promotes a Microsoft Foundry prompt agent from dev, through a test/UAT project, to production. On the way it passes security, residency, quality, Responsible AI and human gates. Each gate fails closed.
 
 ```
-PR / push ──► Gate 1a CI ──► deploy dev ──► Gate 1b quality eval
-release tag ──► Gate 2 AI red team (reused if the agent is unchanged) ──► Gate 3 human approval ──► deploy prod + smoke + auto-rollback
+PR / push ──► G1 code & security ──► G2 residency + deploy dev ──► G3 evaluation (quality + RAI)
+release tag ──► G2 + deploy test ──► G4 AI red team ──► approval packet + RAI scorecard
+            ──► G5 UAT ratings + QA / business / RAI sign-offs ──► G6 release decision ──► G2 + deploy prod + smoke + auto-rollback
+daily       ──► prod drift check
 ```
 
 | Gate | What it checks | When it runs |
 |---|---|---|
-| 1a CI | unit tests, config rendering, eval data and policy validation | every PR and push |
-| 1b Quality | Foundry cloud evaluation: must-pass safety and scope cases, plus task adherence and intent resolution floors | push to `main`, release tags |
-| 2 Red team | Foundry AI Red Teaming per risk category, with attack-success-rate limits and sample-size bounds | release tags only (it's expensive); a passing scan of the same agent fingerprint from the last 30 days is reused |
-| 3 Approval | required reviewers on the `prod` GitHub environment | before every prod deploy |
+| G1 Code & security | secret scan (gitleaks), dependency scan (pip-audit), unit tests, config rendering, rule-file validation | every PR and push |
+| G2 Config & residency | the environment's Azure setup against the customer rules in `policy.json` (presets: Canada strict, EU data zone, US, permissive; block or warn per rule) | before every deploy |
+| G3 Evaluation | Foundry evaluation: must-pass behavior and privacy cases, document answers, citations, safety, groundedness, PII leaks, protected material | push to `main`, release tags (reused when unchanged) |
+| G4 Red team | Foundry AI Red Teaming of the release candidate in the test project | release tags (reused when unchanged) |
+| G5 UAT + sign-offs | testers' ratings of the exact release candidate in Foundry (human evaluation / trace 👍👎), then QA, business-owner and RAI approvals | release tags |
+| G6 Release decision | all sign-offs present and recent, then the release manager approves `prod` | before every prod deploy |
 
 ## Contents
 
-- [cicd/](cicd/): agent-as-code, eval datasets, thresholds, the gate CLIs and tests. **Start with [cicd/README.md](cicd/README.md)** for setup and the runbook.
-- [.github/workflows/](.github/workflows/): the pipeline (`shift-manager-cicd.yml`), the reusable deploy workflow (`agent-deploy.yml`) and the weekly trace harvest that proposes new test cases from real conversations (`harvest-traces.yml`).
-- [docs/](docs/): design diagrams (open the `.drawio` files at [app.diagrams.net](https://app.diagrams.net)); start with [agent-cicd-current.drawio](docs/agent-cicd-current.drawio), the pipeline as it runs today, and [agent-cicd-target.drawio](docs/agent-cicd-target.drawio), the target design (dev → test/UAT → prod with residency, identity and Responsible AI gates). Also a mock pipeline dashboard (`agent-cicd-dashboard.html`, illustrative data).
+- [cicd/](cicd/): agent-as-code, customer rules, eval datasets, thresholds, the gate CLIs and tests. **Start with [cicd/README.md](cicd/README.md)** for setup, roles and the runbook.
+- [.github/workflows/](.github/workflows/): the pipeline (`shift-manager-cicd.yml`), the reusable deploy workflow (`agent-deploy.yml`), the daily prod drift check (`prod-drift-check.yml`), portal-to-PR promotion (`promote-portal-agent.yml`) and the trace harvest that proposes new test cases from real conversations (`harvest-traces.yml`).
+- [docs/](docs/): design diagrams (open the `.drawio` files at [app.diagrams.net](https://app.diagrams.net)). [agent-cicd-target.drawio](docs/agent-cicd-target.drawio) is the design this pipeline now implements, except identity persona tests (G4) and the ASSERT-generated test-case path. [agent-cicd-current.drawio](docs/agent-cicd-current.drawio) is the earlier dev → prod pipeline. Also a mock pipeline dashboard (`agent-cicd-dashboard.html`, illustrative data).
 
 ## Quick start
 
@@ -29,10 +33,10 @@ pip install -r requirements.txt pytest
 python -m pytest tests -q
 ```
 
-Live gates need `az login` (or OIDC in Actions) with the **Foundry User** role on the target project. No endpoints are committed: copy [cicd/.env.example](cicd/.env.example) to `cicd/.env` for local runs, and set the same names as GitHub Environment variables for Actions. See [cicd/README.md](cicd/README.md).
+Live gates need `az login` (or OIDC in Actions) with the **Foundry User** role on the target project. No endpoints are committed: copy [cicd/.env.example](cicd/.env.example) to `cicd/.env` for local runs, and set the same names as GitHub Environment secrets for Actions. See [cicd/README.md](cicd/README.md).
 
-## Status (v1)
+## Status
 
-- Verified live against the dev project: deploy, smoke test and Gate 1b (29/29 pass).
-- Not yet verified live: Gate 2. Its decision logic is unit-tested offline against a real scan.
-- To do before the first prod release: OIDC identities, the `dev` and `prod` environments with reviewers and variables, the prod model deployment, and RAI sign-off on thresholds.
+- Live in prod: `shiftmanageragent-promptv3` v1, released through the earlier dev → prod pipeline (`shift-manager-v1.0.2`).
+- Built: test/UAT project, G1 scans, G2 residency rules (Canada strict, warn mode), G3 RAI checks, G5 UAT evidence and sign-offs, G6 release decision, drift check.
+- Not built yet: identity persona tests (needs test users and a security-trimmed index), continuous evaluation in prod, ASSERT-generated test cases.

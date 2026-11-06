@@ -1,0 +1,11 @@
+{
+  "_about": "Who signs off a release (G5) and how the release decision (G6) checks it. Each sign-off is a GitHub environment with its own required reviewer. Sandbox: one person holds every role, so distinct approvers are not required; set require_distinct_approvers to true for a real team.",
+  "signoffs": {
+    "qa": {"title": "QA", "environment": "signoff-qa", "checks": "Evaluation and red-team results reviewed; failures understood"},
+    "business": {"title": "Business owner (UAT)", "environment": "signoff-business", "checks": "Users tried the release candidate in the test project and rated answers"},
+    "rai": {"title": "Responsible AI reviewer", "environment": "signoff-rai", "checks": "RAI scorecard, residency findings and privacy results accepted"}
+  },
+  "release_manager_environment": "prod",
+  "require_distinct_approvers": false,
+  "max_signoff_age_days": 14
+}

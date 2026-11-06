@@ -1,5 +1,6 @@
 {
   "project_endpoint": "${FOUNDRY_PROJECT_ENDPOINT}",
+  "azure_resource_group": "OPG-AGENT",
   "agent_name": "shiftmanageragent-promptv3",
   "model_deployment": "gpt-5.4",
   "judge_deployment": "gpt-5.4",

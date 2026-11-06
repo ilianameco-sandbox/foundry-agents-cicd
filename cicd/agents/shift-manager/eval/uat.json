@@ -1,0 +1,8 @@
+{
+  "_about": "G5 UAT evidence rules: testers rate answers of the release candidate in the test project (Foundry human evaluation or trace thumbs). Ratings for other versions are ignored.",
+  "min_rated_answers": 10,
+  "min_thumbs_up_rate": 0.8,
+  "evaluation_names": ["task_completion"],
+  "sources": ["builder", "end_user"],
+  "lookback_days": 30
+}

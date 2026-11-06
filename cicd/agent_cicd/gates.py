@@ -187,6 +187,7 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
     for name, rule in criteria.items():
         passed = scored = 0
         applies_to = set(rule.get("applies_to") or [])
+        excluded = set(rule.get("exclude_categories") or [])
         for row in dataset:
             item = by_id.get(row["id"])
             if item is None or row["id"] in run_failures:
@@ -194,6 +195,8 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
             is_must_pass_check = name == must_pass_criterion and row["must_pass"]
             if (applies_to and row["category"] not in applies_to and suite_of(row) not in applies_to
                     and not is_must_pass_check):
+                continue
+            if row["category"] in excluded and not is_must_pass_check:
                 continue
             if row["id"] in blocked:
                 if name == must_pass_criterion:

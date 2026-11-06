@@ -1,0 +1,7 @@
+{
+  "_about": "Customer rules for the Shift Manager agent. Start from a preset, override single rules below, and keep enforcement 'warn' until the resources meet the preset (then switch to 'enforce').",
+  "preset": "canada-strict",
+  "enforcement": "warn",
+  "owner": "OPG security and privacy (to confirm)",
+  "rules": {}
+}

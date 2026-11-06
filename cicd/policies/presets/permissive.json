@@ -1,0 +1,13 @@
+{
+  "description": "No residency requirement: Global deployments allowed; only baseline safety and security checks",
+  "rules": {
+    "model_region": {"severity": "off"},
+    "model_deployment_type": {"severity": "off"},
+    "data_store_region": {"severity": "off"},
+    "content_filter": {"severity": "block", "why": "Every model deployment needs an Azure AI content filter policy"},
+    "prompt_shields": {"severity": "block", "why": "Jailbreak attempts in user prompts are detected and blocked"},
+    "key_auth_disabled": {"severity": "warn", "why": "Only Entra ID identities can call the resource (no shared API keys)"},
+    "private_network": {"severity": "warn", "why": "The Foundry resource is reachable only through private endpoints"},
+    "tracing_enabled": {"severity": "block", "environments": ["test"], "why": "UAT feedback and traces are recorded in Application Insights"}
+  }
+}

@@ -1,5 +1,5 @@
-# Reusable deploy step: create the agent version from code, record it, smoke-test it,
-# and (prod only) roll back to the previous version if the smoke test fails.
+# Reusable deploy step: check the environment's Azure config against policy.json (G2), create the agent
+# version from code, record it, smoke-test it, and (prod only) roll back if the smoke test fails.
 name: agent-deploy
 
 on:
@@ -27,6 +27,8 @@ on:
         value: ${{ jobs.deploy.outputs.fingerprint }}
       model_version:
         value: ${{ jobs.deploy.outputs.model_version }}
+      policy_outcome:
+        value: ${{ jobs.deploy.outputs.policy_outcome }}
 
 permissions:
   id-token: write
@@ -49,6 +51,7 @@ jobs:
       previous_version: ${{ steps.deploy.outputs.previous_version }}
       fingerprint: ${{ steps.deploy.outputs.fingerprint }}
       model_version: ${{ steps.deploy.outputs.model_version }}
+      policy_outcome: ${{ steps.policy.outputs.policy_outcome }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -77,6 +80,20 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # G2 runs before anything is created: a blocking finding (enforcement "enforce") stops this deploy.
+      - name: "G2: config & residency (policy.json)"
+        id: policy
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: >-
+          python -m agent_cicd.policy_gate --agent-dir "${{ inputs.agent_dir }}" --env "${{ inputs.environment }}"
+          --report "out/policy-${{ inputs.environment }}.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: policy-report-${{ inputs.environment }}
+          path: cicd/out/policy-${{ inputs.environment }}.json
+          if-no-files-found: ignore
       - name: Create agent version from code
         id: deploy
         run: python -m agent_cicd.deploy --agent-dir "${{ inputs.agent_dir }}" --env "${{ inputs.environment }}"

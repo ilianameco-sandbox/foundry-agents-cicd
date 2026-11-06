@@ -1,0 +1,16 @@
+# Who reviews which change (enforce with a branch ruleset on main: "Require review from Code Owners").
+# Sandbox: one person holds every role. For a customer, replace each handle with that role's team.
+*                                    @ilianamecoMS
+# Agent behaviour: the agent owner
+/cicd/agents/*/agent.json            @ilianamecoMS
+/cicd/agents/*/instructions.md       @ilianamecoMS
+# Test cases, judges and pass bars: QA
+/cicd/agents/*/eval/                 @ilianamecoMS
+# Customer rules, sign-off roles and red-team policy: Responsible AI / security
+/cicd/agents/*/policy.json           @ilianamecoMS
+/cicd/agents/*/governance.json       @ilianamecoMS
+/cicd/agents/*/eval/redteam.json     @ilianamecoMS
+/cicd/policies/                      @ilianamecoMS
+# The pipeline itself: platform owner
+/.github/                            @ilianamecoMS
+/cicd/agent_cicd/                    @ilianamecoMS

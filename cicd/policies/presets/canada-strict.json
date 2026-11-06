@@ -1,0 +1,13 @@
+{
+  "description": "Canadian data residency: models and data stores in Canada, regional (Standard) processing only",
+  "rules": {
+    "model_region": {"severity": "block", "allowed_regions": ["canadacentral", "canadaeast"], "why": "The Foundry resource (and so its Standard deployments) is in Canada"},
+    "model_deployment_type": {"severity": "block", "allowed_skus": ["Standard", "ProvisionedManaged"], "why": "Prompts and answers are processed only in the resource's region (Global and Data Zone types can process elsewhere)"},
+    "data_store_region": {"severity": "block", "allowed_regions": ["canadacentral", "canadaeast"], "why": "Search indexes, traces and other connected stores are in Canada"},
+    "content_filter": {"severity": "block", "why": "Every model deployment needs an Azure AI content filter policy"},
+    "prompt_shields": {"severity": "block", "why": "Jailbreak attempts in user prompts are detected and blocked"},
+    "key_auth_disabled": {"severity": "warn", "why": "Only Entra ID identities can call the resource (no shared API keys)"},
+    "private_network": {"severity": "warn", "why": "The Foundry resource is reachable only through private endpoints"},
+    "tracing_enabled": {"severity": "block", "environments": ["test"], "why": "UAT feedback and traces are recorded in Application Insights"}
+  }
+}

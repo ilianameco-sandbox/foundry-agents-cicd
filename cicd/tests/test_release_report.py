@@ -18,7 +18,7 @@ def quality_report(fail=None):
     fail = fail or {}
     items = []
     for row in DATASET:
-        judges = ["expected_behavior"] if row.get("suite") == "behavior" else list(DOC_JUDGES)
+        judges = THRESHOLDS["suites"][row.get("suite") or "behavior"]["criteria"]
         results = [{"name": j, "passed": j not in fail.get(row["id"], ()), "reason": f"{j} reason <b>"}
                    for j in judges]
         items.append({"datasource_item": {**row, "sample.output_text": f"answer to {row['id']}"}, "results": results})
@@ -80,10 +80,12 @@ def test_document_results_are_sliced_by_modality_and_trap():
 
 def test_markdown_has_gates_links_and_approver_steps():
     md = render_markdown(build_packet(quality_report(), redteam_report(), THRESHOLDS, POLICY, CONTEXT))
-    assert "READY FOR HUMAN APPROVAL" in md
+    assert "READY FOR SIGN-OFF" in md
     assert "[documents](https://ai.azure.com/doc)" in md and "[Foundry](https://ai.azure.com/rt)" in md
     assert "Review deployments" in md and "shift-manager-v1.0.0" in md
+    assert "signoff-qa" in md and "signoff-business" in md and "signoff-rai" in md
     assert "| prohibited_actions | 100 | 0 |" in md and "task_adherence (advisory)" in md
+    assert "## Responsible AI scorecard" in md
 
 
 def test_close_to_limit_red_team_is_ready_but_flagged():
@@ -120,3 +122,35 @@ def test_content_filtered_cases_are_not_listed_as_failures():
     assert report["result"]["outcome"] == PASS
     assert q["failures"] == [] and q["content_filtered"] == ["INJ-01"]
     assert "counted as safe): INJ-01" in render_markdown(build_packet(report, None, THRESHOLDS, POLICY, CONTEXT))
+
+
+def policy_report(outcome, env="test"):
+    rows = [{"rule": "model_deployment_type", "subject": "gpt-5.4", "status": "block", "severity": "block",
+             "finding": "GlobalStandard: processed in any Azure region worldwide"}]
+    return {"result": {"outcome": outcome, "reasons": ["model_deployment_type (gpt-5.4): GlobalStandard"],
+                       "rows": rows, "details": {"preset": "canada-strict", "enforcement": "warn",
+                                                 "environment": env, "would_block": 1, "warnings": 0}}}
+
+
+def test_residency_warnings_flag_and_blocks_stop_the_release():
+    flagged = build_packet(quality_report(), redteam_report(), THRESHOLDS, POLICY, CONTEXT,
+                           {"dev": policy_report(PASS), "test": policy_report(REVIEW)})
+    assert flagged["ready"] and flagged["flagged"]
+    md = render_markdown(flagged)
+    assert "G2 · Config & residency (test)" in md and "Config & residency findings (test)" in md
+    blocked = build_packet(quality_report(), redteam_report(), THRESHOLDS, POLICY, CONTEXT,
+                           {"test": policy_report(FAIL)})
+    assert not blocked["ready"]
+    missing = build_packet(quality_report(), redteam_report(), THRESHOLDS, POLICY, CONTEXT, {"test": None})
+    assert not missing["ready"]
+
+
+def test_rai_scorecard_maps_evidence_to_principles():
+    packet = build_packet(quality_report(), redteam_report(), THRESHOLDS, POLICY, CONTEXT,
+                          {"test": policy_report(REVIEW)})
+    card = {row["principle"]: row for row in packet["scorecard"]}
+    assert card["Privacy & security"]["status"] == REVIEW
+    assert any("pii_leak" in e for e in card["Privacy & security"]["evidence"])
+    assert any("red team prohibited_actions" in e for e in card["Reliability & safety"]["evidence"])
+    assert card["Transparency"]["status"] == PASS
+    assert card["Fairness"]["status"] == "HUMAN" and card["Accountability"]["status"] == "HUMAN"
