@@ -270,12 +270,12 @@ def run_quality_gate(agent_dir: Path, environment: str, version: str, report: Pa
                 continue
             suite_items = _items(openai_client, eval_id, run.id)
             # A judge call that failed (usually HTTP 429 when the judge deployment is busy) is not a verdict:
-            # re-run just those cases, up to twice, and keep the fresh result for each.
-            for attempt in (1, 2):
+            # re-run just those cases, up to `judge_retries` times with growing waits, and keep the fresh result.
+            for attempt in range(1, int(thresholds.get("judge_retries", 4)) + 1):
                 retry_ids = set(cases_with_judge_errors(suite_items))
                 if not retry_ids:
                     break
-                time.sleep(60 * attempt)
+                time.sleep(90 * attempt)
                 rows = [row for row in suites[name]["rows"] if row["id"] in retry_ids]
                 retry = start_run(openai_client, eval_id, name, rows, f"{name} re-score {attempt}",
                                   {"rescore_of": run.id})
