@@ -86,6 +86,10 @@ def build_criteria(thresholds: dict[str, Any], judge_deployment: str,
                 "evaluator_name": rule["evaluator"],
                 "data_mapping": {"query": "{{item.query}}", "response": response},
             }
+            if rule.get("context"):
+                # The agent's output often holds only the search call, not its results, so tool-aware
+                # evaluators can't see the source; give them the case's source facts instead.
+                criterion["data_mapping"]["context"] = "{{item." + rule["context"] + "}}"
             if rule.get("evaluator_version"):
                 criterion["evaluator_version"] = rule["evaluator_version"]
             if rule.get("needs_judge", True):
