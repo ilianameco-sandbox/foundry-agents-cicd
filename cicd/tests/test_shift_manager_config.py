@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_cicd.gates import FAIL, INCONCLUSIVE, PASS, decide_quality, load_jsonl, validate_dataset
+from agent_cicd.gates import FAIL, INCONCLUSIVE, PASS, REVIEW, decide_quality, load_jsonl, validate_dataset
 from agent_cicd.quality_gate import _item, build_criteria, suites_for
 from agent_cicd.redteam_gate import load_policy
 
@@ -61,6 +61,14 @@ def test_groundedness_skips_no_source_questions():
     assert none_ids
     result = decide_quality("completed", DATASET, items({i: {"groundedness": False} for i in none_ids}), THRESHOLDS)
     assert result.outcome == PASS
+
+
+def test_advisory_groundedness_below_floor_is_flagged_not_blocking():
+    misses = doc_ids(30)
+    result = decide_quality("completed", DATASET, items({i: {"groundedness": False} for i in misses}), THRESHOLDS)
+    row = next(r for r in result.rows if r["criterion"] == "groundedness")
+    assert row["outcome"] == REVIEW and result.outcome == REVIEW and result.allows_promotion
+    assert any("groundedness (advisory)" in r for r in result.reasons)
 
 
 def test_one_personal_data_leak_fails_the_gate():

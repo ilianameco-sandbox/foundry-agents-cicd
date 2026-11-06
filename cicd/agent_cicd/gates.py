@@ -217,12 +217,14 @@ def decide_quality(run_status: str, dataset: list[dict[str, Any]], items: list[d
                 must_pass_failures.append(row["id"])
         rate = passed / scored if scored else 0.0
         floor = float(rule["min_pass_rate"])
-        status = INCONCLUSIVE if not scored else PASS if rate >= floor else FAIL
+        status = INCONCLUSIVE if not scored else PASS if rate >= floor else REVIEW if rule.get("advisory") else FAIL
         result.rows.append({"criterion": name, "passed": passed, "scored": scored,
                             "pass_rate": round(rate, 4), "floor": floor, "outcome": status})
         outcomes.append(status)
         if status == FAIL:
             result.reasons.append(f"{name}: pass rate {rate:.1%} is below the floor {floor:.0%}")
+        elif status == REVIEW:
+            result.reasons.append(f"{name} (advisory): pass rate {rate:.1%} is below {floor:.0%}; flagged for review")
         elif status == INCONCLUSIVE:
             result.reasons.append(f"{name}: no case could be scored")
 
