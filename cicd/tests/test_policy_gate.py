@@ -124,3 +124,31 @@ def test_collect_facts_reads_account_deployments_and_connected_stores():
     assert [(s["kind"], s["location"]) for s in got["data_stores"]] == [("azure_ai_search", "Central US"),
                                                                         ("app_insights", "swedencentral")]
     assert got["tracing"] is True
+
+
+def test_arm_reads_retry_transient_network_errors(monkeypatch):
+    import http.client
+    import io
+    import time
+    import urllib.request
+    from agent_cicd import policy_gate
+
+    calls = {"n": 0}
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise http.client.IncompleteRead(b"{", 10)
+        return Response(b'{"location": "canadacentral"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    assert policy_gate.arm_getter("token")("/x", "1") == {"location": "canadacentral"}
+    assert calls["n"] == 2

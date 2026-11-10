@@ -200,16 +200,28 @@ def _subscription() -> str:
 
 
 def arm_getter(token: str) -> Callable[[str, str], dict[str, Any] | None]:
+    import http.client
+    import time
+
     def get(path: str, api_version: str) -> dict[str, Any] | None:
         url = f"{ARM}{path}{'&' if '?' in path else '?'}api-version={api_version}"
         request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            if error.code in (403, 404):
-                return None
-            raise
+        # Transient network failures (a truncated body, a reset connection, throttling) are retried;
+        # 403/404 mean "not readable" and are reported as unknown by the rules.
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                if error.code in (403, 404):
+                    return None
+                if error.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                    raise
+            except (http.client.IncompleteRead, urllib.error.URLError, ConnectionError, TimeoutError):
+                if attempt == 3:
+                    raise
+            time.sleep(2 * (attempt + 1))
+        return None
     return get
 
 
