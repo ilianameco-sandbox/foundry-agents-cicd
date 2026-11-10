@@ -12,13 +12,14 @@ from agent_cicd.uat_evidence import Rating, decide_uat, load_rules, to_markdown 
 
 AGENT_DIR = Path(__file__).resolve().parents[1] / "agents" / "shift-manager"
 CREATED = datetime(2026, 11, 1, tzinfo=timezone.utc)
-RULES = {"min_rated_answers": 10, "min_thumbs_up_rate": 0.8, "evaluation_names": ["task_completion"],
+RULES = {"min_rated_answers": 10, "min_thumbs_up_rate": 0.8, "evaluation_names": ["task_completion", "overall_quality"],
          "sources": ["builder", "end_user"], "lookback_days": 30}
 
 
-def rating(i, up=True, version="3", source="builder", name="agent", when=None, response=None):
+def rating(i, up=True, version="3", source="builder", name="agent", when=None, response=None,
+           eval_name="task_completion"):
     when = when or CREATED + timedelta(hours=i + 1)
-    return Rating(timestamp=when.isoformat().replace("+00:00", "Z"), source=source, eval_name="task_completion",
+    return Rating(timestamp=when.isoformat().replace("+00:00", "Z"), source=source, eval_name=eval_name,
                   score=1.0 if up else 0.0, label="pass" if up else "fail", explanation="" if up else f"wrong {i}",
                   agent_name=name, agent_version=version, response_id=response or f"resp-{i}", trace_id=f"t{i}")
 
@@ -28,6 +29,18 @@ def rating(i, up=True, version="3", source="builder", name="agent", when=None, r
 def test_shipped_uat_rules():
     rules = load_rules(AGENT_DIR)
     assert rules["min_rated_answers"] == 10 and rules["min_thumbs_up_rate"] == 0.8
+    assert {"task_completion", "overall_quality"} <= set(rules["evaluation_names"])
+
+
+def test_portal_trace_thumbs_count():
+    # Foundry portal annotations arrive as gen_ai.evaluation.result with gen_ai.evaluation.name "overall_quality".
+    result = decide_uat([rating(i, eval_name="overall_quality") for i in range(10)], RULES, "agent", "3", CREATED)
+    assert result.outcome == PASS and result.details["rated"] == 10
+
+
+def test_automated_evaluator_results_are_not_ratings():
+    automated = [rating(i, eval_name="prohibited_actions") for i in range(20)]
+    assert decide_uat(automated, RULES, "agent", "3", CREATED).details["rated"] == 0
 
 
 def test_enough_positive_ratings_pass():

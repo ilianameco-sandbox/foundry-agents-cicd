@@ -25,7 +25,9 @@ from .foundry import add_summary, project_client, set_outputs, write_report
 from .gates import FAIL, INCONCLUSIVE, PASS, GateResult
 from .policy_gate import COGNITIVE_API, _arm_token, _subscription, arm_getter
 
-DEFAULT_RULES = {"min_rated_answers": 10, "min_thumbs_up_rate": 0.8, "evaluation_names": ["task_completion"],
+# The portal labels trace thumbs "overall_quality"; the docs and SDK samples use "task_completion".
+DEFAULT_RULES = {"min_rated_answers": 10, "min_thumbs_up_rate": 0.8,
+                 "evaluation_names": ["task_completion", "overall_quality"],
                  "sources": ["builder", "end_user"], "lookback_days": 30}
 
 _KQL = """
